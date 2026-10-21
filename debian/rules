@@ -132,6 +132,22 @@ override_dh_installsystemd:
 	dh_installsystemd -popenvswitch-switch --name=ovs-record-hostname --no-start
 	dh_installsystemd --no-restart-after-upgrade -Xovs-vswitchd.service -Xovsdb-server.service -Xovs-record-hostname.service
 
+# This package is debhelper-compat (= 10). At compat 10 (unlike 11+), dh's
+# default sequence calls the separate legacy dh_systemd_enable/dh_systemd_start
+# commands, not dh_installsystemd above - that override is dead code here,
+# never invoked (harmless to leave for whenever this bumps to compat 11+,
+# where dh_installsystemd becomes the live step instead). dh_systemd_start has
+# no --no-start equivalent, so excluding these three units is the only way to
+# keep it from triggering 'deb-systemd-invoke restart' on upgrade - which it
+# otherwise does unconditionally for every systemd unit the package installs,
+# init.d equivalent or not (the compat(11) gate that would normally defer to
+# invoke-rc.d for those is not active below compat 11).
+override_dh_systemd_enable:
+	dh_systemd_enable -Xovs-vswitchd.service -Xovsdb-server.service -Xovs-record-hostname.service
+
+override_dh_systemd_start:
+	dh_systemd_start --no-restart-after-upgrade -Xovs-vswitchd.service -Xovsdb-server.service -Xovs-record-hostname.service
+
 override_dh_strip:
 	dh_strip --dbgsym-migration='openvswitch-dbg (<< 2.17~)'
 

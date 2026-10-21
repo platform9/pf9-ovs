@@ -142,11 +142,20 @@ override_dh_installsystemd:
 # otherwise does unconditionally for every systemd unit the package installs,
 # init.d equivalent or not (the compat(11) gate that would normally defer to
 # invoke-rc.d for those is not active below compat 11).
+#
+# dh_systemd_start's own -X exclusion only filters the *initial* unit list -
+# openvswitch-switch.service's Also=ovs-record-hostname.service directive
+# gets expanded and re-added to the queue AFTER that filtering runs, with no
+# re-check against -X. So ovs-record-hostname.service must stay excluded (it
+# would otherwise leak back in) *and* openvswitch-switch.service itself must
+# be excluded too (the only thing left pulling it in) - but only from
+# dh_systemd_start, not dh_systemd_enable: it should still get enabled so it
+# starts on boot, just not explicitly started/restarted by this postinst.
 override_dh_systemd_enable:
 	dh_systemd_enable -Xovs-vswitchd.service -Xovsdb-server.service -Xovs-record-hostname.service
 
 override_dh_systemd_start:
-	dh_systemd_start --no-restart-after-upgrade -Xovs-vswitchd.service -Xovsdb-server.service -Xovs-record-hostname.service
+	dh_systemd_start --no-restart-after-upgrade -Xopenvswitch-switch.service -Xovs-vswitchd.service -Xovsdb-server.service -Xovs-record-hostname.service
 
 override_dh_strip:
 	dh_strip --dbgsym-migration='openvswitch-dbg (<< 2.17~)'

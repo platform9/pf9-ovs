@@ -1,4 +1,4 @@
-test#!/bin/bash
+test2#!/bin/bash
 
 set -ev
 

@@ -680,8 +680,12 @@ force_reload_kmod () {
     flow_restore_wait
     start_forwarding || return 1
 
-    # Restore saved flows and inform vswitchd that we are done.
+    # Restore saved flows and inform vswitchd that we are done. Capture
+    # restore_flows' own exit status here: it is not the last command run
+    # in this function, so without this it would otherwise be silently
+    # discarded in favor of whatever runs after it.
     restore_flows
+    restore_rc=$?
     flow_restore_complete
     add_managers
 
@@ -689,6 +693,8 @@ force_reload_kmod () {
 
     action "Finding processes on dead interfaces" timeout 5 \
         "$datadir/scripts/ovs-check-dead-ifs" || true
+
+    return $restore_rc
 }
 
 ## ------- ##
@@ -714,8 +720,18 @@ restart () {
     flow_restore_wait
     start_forwarding || return 1
 
-    # Restore saved flows and inform vswitchd that we are done.
+    # Restore saved flows and inform vswitchd that we are done. Capture
+    # restore_flows' own exit status here: it is not the last command run
+    # in this function, so without this it would otherwise be silently
+    # discarded in favor of whatever add_managers returns.
     restore_flows
+    restore_rc=$?
     flow_restore_complete
     add_managers
+    managers_rc=$?
+
+    if test $restore_rc != 0; then
+        return $restore_rc
+    fi
+    return $managers_rc
 }

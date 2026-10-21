@@ -113,8 +113,15 @@ execute_after_dh_install:
 			$(CURDIR)/debian/openvswitch-test/usr/lib/python$$pyvers/dist-packages/ovstest; \
 	done
 
+# --no-restart-after-upgrade: don't let dpkg cold-restart openvswitch-switch
+# (and, via PartOf=, ovsdb-server/ovs-vswitchd/ovs-record-hostname) outside the
+# flow-restore-wait-aware reload path. pf9-neutron's ovn-controller config
+# script already detects a real OVS version change and performs a single
+# controlled 'systemctl reload-or-restart', which goes through ovs-ctl's
+# save/restore-flows logic - debhelper's own restart-on-upgrade would race
+# that and can cold-restart the datapath before flows are saved.
 override_dh_installinit:
-	dh_installinit --restart-after-upgrade
+	dh_installinit --no-restart-after-upgrade
 	dh_installinit -popenvswitch-switch --name=ovsdb-server --no-start
 	dh_installinit -popenvswitch-switch --name=ovs-vswitchd --no-start
 	dh_installinit -popenvswitch-switch --name=ovs-record-hostname --no-start
@@ -123,7 +130,7 @@ override_dh_installsystemd:
 	dh_installsystemd -popenvswitch-switch --name=ovsdb-server --no-start
 	dh_installsystemd -popenvswitch-switch --name=ovs-vswitchd --no-start
 	dh_installsystemd -popenvswitch-switch --name=ovs-record-hostname --no-start
-	dh_installsystemd --restart-after-upgrade -Xovs-vswitchd.service -Xovsdb-server.service -Xovs-record-hostname.service
+	dh_installsystemd --no-restart-after-upgrade -Xovs-vswitchd.service -Xovsdb-server.service -Xovs-record-hostname.service
 
 override_dh_strip:
 	dh_strip --dbgsym-migration='openvswitch-dbg (<< 2.17~)'

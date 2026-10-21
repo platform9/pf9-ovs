@@ -45,5 +45,6 @@ if [ "$1" = "force-reload-kmod" ]; then
 else
     restart
 fi
+rc=$?
 
-exit 0
+exit $rc

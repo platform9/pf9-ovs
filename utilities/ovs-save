@@ -133,6 +133,27 @@ save_flows () {
              cnt++;printf "{class="$1",type="$2",len="$3"}->"$4}'
         echo "'"
 
+        # Meters can't be included in the OpenFlow 1.4 bundle transaction
+        # used below for groups/flows (OFPTYPE_METER_MOD isn't bundlable -
+        # see lib/ofp-bundle.c's ofputil_is_bundlable()), and a flow
+        # referencing a meter that doesn't exist yet fails the *entire*
+        # bundle replay with OFPERR_OFPMMFC_INVALID_METER (ofproto.c's
+        # ofproto_check_ofpacts()). So meters are restored first, as
+        # individual non-bundled add-meter commands - one per dumped meter,
+        # since ovs-ofctl has no file-based bulk add-meters command like
+        # add-groups/replace-flows. Meters require OpenFlow 1.3+ (see
+        # lib/ofp-meter.c), a stricter floor than groups/flows' 1.4 bundle
+        # gate just below, so this is gated separately.
+        if [ ${ofp_version#OpenFlow} -ge 13 ]; then
+            ovs-ofctl -O $ofp_version dump-meters "$bridge" | \
+                grep '^meter=' | \
+                while IFS= read -r meter_line; do
+                    printf "%s" "ovs-ofctl -O $ofp_version add-meter ${bridge} '"
+                    printf '%s' "$meter_line"
+                    echo "'"
+                done
+        fi
+
         # If possible use OpenFlow 1.4 atomic bundle txn for flows and groups
         [ ${ofp_version#OpenFlow} -ge 14 ] && bundle=" --bundle" || bundle=""
 

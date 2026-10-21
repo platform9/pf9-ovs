@@ -145,3 +145,6 @@ get-orig-snapshot:
 		git archive --format tgz --prefix=openvswitch-$(VERSION)~git$(DATE).$$COMMIT/ \
 			-o ../../openvswitch_$(VERSION)~git$(DATE).$$COMMIT.orig.tar.gz $(BRANCH)
 	rm -Rf openvswitch-upstream
+
+override_dh_builddeb:
+	dh_builddeb -- -Zxz

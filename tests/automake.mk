@@ -331,6 +331,10 @@ check-oftest: all
 	$(AM_V_at)srcdir='$(srcdir)' $(SHELL) $(srcdir)/tests/run-oftest
 EXTRA_DIST += tests/run-oftest
 
+# Zero-loss regression tests for ovs-lib.in/ovs-save (plain shell scripts,
+# not part of the Autotest testsuite above).
+EXTRA_DIST += tests/ovs-lib-restart-exit-code-test.sh tests/ovs-save-meters-test.sh
+
 # Ryu support.
 check-ryu: all
 	$(AM_V_at)srcdir='$(srcdir)' $(SHELL) $(srcdir)/tests/run-ryu

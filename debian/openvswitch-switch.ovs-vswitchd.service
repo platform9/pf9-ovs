@@ -15,26 +15,61 @@ PIDFile=/run/openvswitch/ovs-vswitchd.pid
 Restart=on-failure
 Environment=HOME=/var/run/openvswitch
 EnvironmentFile=-/etc/default/openvswitch-switch
-ExecStart=/usr/share/openvswitch/scripts/ovs-ctl \
-          --no-ovsdb-server --no-monitor --system-id=random \
-          --no-record-hostname \
-          start $OVS_CTL_OPTS
 # A plain "stop" (ovs-ctl's stop_daemon) tells ovs-vswitchd to exit without
 # first dumping its flow/group/meter/port state, so ofproto's normal
 # exit-time cleanup deletes every bridge and port - the kernel datapath goes
 # empty and stays that way until something external reprograms it from
-# scratch. Using the same save-flows/flow-restore-wait/restore-flows cycle
-# ExecReload already uses here means any restart of this unit - whatever
-# triggers it (systemctl restart, needrestart, a package upgrade) - saves the
-# current flow state, restarts cleanly, and replays it, instead of leaving
-# the bridge with zero flows until ovn-controller (or whatever owns it)
-# notices and recomputes. ExecStart below still runs afterward as part of a
-# normal systemd restart cycle; ovs-ctl's own start already no-ops safely if
-# the daemon this just brought up is already running.
-ExecStop=/usr/share/openvswitch/scripts/ovs-ctl --no-ovsdb-server \
-          --no-monitor --system-id=random \
-          --no-record-hostname \
-          restart $OVS_CTL_OPTS
+# scratch.
+#
+# An earlier version of this fix put a full self-contained "save, stop,
+# start, restore" cycle (ovs-ctl's own "restart" command) directly in
+# ExecStop, on the theory that ExecStart below would then just see the
+# daemon already running and no-op. It doesn't: systemd's default
+# KillMode=control-group sweeps every process left in this unit's cgroup
+# once ExecStop's script exits, which kills the vswitchd that script had
+# just restarted internally - so the ExecStart that follows starts a
+# genuinely fresh process with nothing restored, silently discarding the
+# save/restore work ExecStop had just done. So the save+stop and
+# start+restore halves are split across ExecStop/ExecStart instead, the way
+# ovs-save's own save_flows_if_required()/restore_flows() are meant to be
+# used (see force_reload_kmod() in ovs-lib.in for the same split, with a
+# database restart added in between): ExecStop saves flows to a file under
+# /run (which survives the process exit - a shell-local mktemp as ovs-ctl's
+# own restart() uses would not) and does a plain stop; ExecStart sets
+# flow-restore-wait before starting so ofproto holds the existing datapath
+# instead of clearing it, starts the daemon, replays the saved file, then
+# clears flow-restore-wait. Whatever triggers this (systemctl restart,
+# needrestart, a package upgrade) now saves the current flow state, restarts
+# cleanly, and replays it - in exactly one stop/start cycle - instead of
+# leaving the bridge with zero flows until ovn-controller (or whatever owns
+# it) notices and recomputes, or losing flows to this same double-restart
+# bug after they were already restored once.
+Environment=OVS_SAVED_FLOWS=/run/openvswitch/vswitchd-saved-flows.sh
+ExecStart=/bin/sh -c '\
+          if [ -x "$OVS_SAVED_FLOWS" ]; then \
+              /usr/bin/ovs-vsctl --no-wait set open_vswitch . other_config:flow-restore-wait=true; \
+          fi; \
+          /usr/share/openvswitch/scripts/ovs-ctl --no-ovsdb-server \
+              --no-monitor --system-id=random --no-record-hostname \
+              start $OVS_CTL_OPTS || exit 1; \
+          if [ -x "$OVS_SAVED_FLOWS" ]; then \
+              "$OVS_SAVED_FLOWS"; \
+              rm -f "$OVS_SAVED_FLOWS"; \
+          fi; \
+          /usr/bin/ovs-vsctl --no-wait --if-exists remove open_vswitch . \
+              other_config flow-restore-wait=true'
+ExecStop=/bin/sh -c '\
+          rm -f "$OVS_SAVED_FLOWS"; \
+          if [ -e /run/openvswitch/ovs-vswitchd.pid ] && \
+             kill -0 "$(cat /run/openvswitch/ovs-vswitchd.pid)" 2>/dev/null; then \
+              bridges=$(/usr/bin/ovs-vsctl -- --real list-br); \
+              if [ -n "$bridges" ]; then \
+                  /usr/share/openvswitch/scripts/ovs-save save-flows $bridges \
+                      > "$OVS_SAVED_FLOWS" && chmod +x "$OVS_SAVED_FLOWS"; \
+              fi; \
+          fi; \
+          exec /usr/share/openvswitch/scripts/ovs-ctl --no-ovsdb-server \
+              --no-monitor --system-id=random --no-record-hostname stop'
 ExecReload=/usr/share/openvswitch/scripts/ovs-ctl --no-ovsdb-server \
           --no-monitor --system-id=random \
           --no-record-hostname \

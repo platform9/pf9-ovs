@@ -44,16 +44,24 @@ EnvironmentFile=-/etc/default/openvswitch-switch
 # leaving the bridge with zero flows until ovn-controller (or whatever owns
 # it) notices and recomputes, or losing flows to this same double-restart
 # bug after they were already restored once.
+#
+# The saved-flows file is read with "sh", not executed directly: /run is
+# mounted noexec (confirmed on this box - `mount | grep /run`), so exec()'ing
+# it straight fails with EACCES regardless of its permission bits. ovs-save's
+# own output has no "#!" shebang line either way - it's meant to be sourced
+# by an interpreter, not run as a standalone program, which is exactly what
+# the original restore_flows()/action() plumbing does under the hood for the
+# /tmp-based mktemp path ovs-ctl's own "restart" command uses.
 Environment=OVS_SAVED_FLOWS=/run/openvswitch/vswitchd-saved-flows.sh
 ExecStart=/bin/sh -c '\
-          if [ -x "$OVS_SAVED_FLOWS" ]; then \
+          if [ -s "$OVS_SAVED_FLOWS" ]; then \
               /usr/bin/ovs-vsctl --no-wait set open_vswitch . other_config:flow-restore-wait=true; \
           fi; \
           /usr/share/openvswitch/scripts/ovs-ctl --no-ovsdb-server \
               --no-monitor --system-id=random --no-record-hostname \
               start $OVS_CTL_OPTS || exit 1; \
-          if [ -x "$OVS_SAVED_FLOWS" ]; then \
-              "$OVS_SAVED_FLOWS"; \
+          if [ -s "$OVS_SAVED_FLOWS" ]; then \
+              sh "$OVS_SAVED_FLOWS"; \
               rm -f "$OVS_SAVED_FLOWS"; \
           fi; \
           /usr/bin/ovs-vsctl --no-wait --if-exists remove open_vswitch . \
@@ -65,7 +73,7 @@ ExecStop=/bin/sh -c '\
               bridges=$(/usr/bin/ovs-vsctl -- --real list-br); \
               if [ -n "$bridges" ]; then \
                   /usr/share/openvswitch/scripts/ovs-save save-flows $bridges \
-                      > "$OVS_SAVED_FLOWS" && chmod +x "$OVS_SAVED_FLOWS"; \
+                      > "$OVS_SAVED_FLOWS"; \
               fi; \
           fi; \
           exec /usr/share/openvswitch/scripts/ovs-ctl --no-ovsdb-server \

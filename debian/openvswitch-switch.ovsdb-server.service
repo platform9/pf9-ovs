@@ -15,7 +15,14 @@ ExecStart=/usr/share/openvswitch/scripts/ovs-ctl \
           --no-ovs-vswitchd --no-monitor --system-id=random \
           --no-record-hostname \
           start $OVS_CTL_OPTS
-ExecStop=/usr/share/openvswitch/scripts/ovs-ctl --no-ovs-vswitchd stop
+# See ovs-vswitchd.service's ExecStop comment: a plain "stop" skips OVS's own
+# flow-save/restore cycle, so any restart of this unit (not just an explicit
+# ExecReload) should go through the same graceful path ExecReload already
+# uses, rather than tearing the database down and relying on whatever starts
+# it next to reconstruct everything from scratch.
+ExecStop=/usr/share/openvswitch/scripts/ovs-ctl --no-ovs-vswitchd \
+          --no-record-hostname \
+          --no-monitor restart $OVS_CTL_OPTS
 ExecReload=/usr/share/openvswitch/scripts/ovs-ctl --no-ovs-vswitchd \
           --no-record-hostname \
           --no-monitor restart $OVS_CTL_OPTS

@@ -3,7 +3,19 @@
 set -e
 
 case "$1" in
-    remove)
+    remove|deconfigure)
+        # ovs-vswitchd.service/ovsdb-server.service's ExecStop now runs the
+        # same graceful restart cycle as ExecReload, deliberately preserving
+        # the datapath/flows/ports across any upgrade-driven stop+start. When
+        # the package is actually going away that preserved state would be
+        # left behind as garbage (stale bridges, kernel datapath flows,
+        # ports), so stop everything for real here first: a plain ovs-ctl
+        # stop, bypassing the unit's own graceful ExecStop, runs ofproto's
+        # normal exit-time cleanup and tears the datapath down.
+        if [ -x /usr/share/openvswitch/scripts/ovs-ctl ]; then
+            /usr/share/openvswitch/scripts/ovs-ctl stop || true
+        fi
+
         update-alternatives --remove ovs-vswitchd /usr/lib/openvswitch-switch/ovs-vswitchd
 
         if [ -x /usr/lib/openvswitch-switch/ovs-vswitchd-dpdk ]; then
@@ -11,7 +23,9 @@ case "$1" in
         fi
         ;;
 
-    deconfigure|upgrade|failed-upgrade)
+    upgrade|failed-upgrade)
+        # Nothing to do: the graceful stop/start is handled by the services
+        # themselves (see ExecStop in ovs-vswitchd.service/ovsdb-server.service).
         ;;
 
     *)

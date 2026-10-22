@@ -15,24 +15,22 @@ ExecStart=/usr/share/openvswitch/scripts/ovs-ctl \
           --no-ovs-vswitchd --no-monitor --system-id=random \
           --no-record-hostname \
           start $OVS_CTL_OPTS
-# See ovs-vswitchd.service's ExecStop comment: a plain "stop" skips OVS's own
-# flow-save/restore cycle, so any restart of this unit (not just an explicit
-# ExecReload) should go through the same graceful path ExecReload already
-# uses, rather than tearing the database down and relying on whatever starts
-# it next to reconstruct everything from scratch.
+# ovsdb-server owns no flows of its own - those live entirely in
+# ovs-vswitchd/the kernel datapath, preserved by ovs-vswitchd.service's own
+# ExecStop. So this unit's restart just needs to bounce the database process
+# without disturbing the Bridge/Port/Interface config already on disk, which
+# a plain stop+start already does (the config is a file, not in-memory
+# state - stop_daemon doesn't touch it).
 #
-# --system-id=random matches ExecStart above: without it, ovs-ctl fails with
-# "system ID not configured" on a from-scratch db (systemd then sees ExecStop
-# itself as a failed control process and, with Restart=on-failure, loops),
-# and every attempt re-runs "ovsdb-tool create" on an empty database -
-# silently discarding every Bridge/Port/Interface row and leaving nothing for
-# the next ovs-vswitchd start to reconstruct from. This was already wrong on
-# ExecReload before this change; it just never got exercised.
-ExecStop=/usr/share/openvswitch/scripts/ovs-ctl --no-ovs-vswitchd \
-          --no-monitor --system-id=random \
-          --no-record-hostname \
-          restart $OVS_CTL_OPTS
-ExecReload=/usr/share/openvswitch/scripts/ovs-ctl --no-ovs-vswitchd \
-          --no-monitor --system-id=random \
-          --no-record-hostname \
-          restart $OVS_CTL_OPTS
+# This deliberately does NOT use ovs-ctl's "restart" command (what
+# ExecReload used before this change, and what ovs-vswitchd.service's own
+# ExecStop correctly uses): restart() unconditionally calls flow_restore_wait/
+# restore_flows regardless of --no-ovs-vswitchd, which only gates the
+# earlier save_flows_if_required check - so scoped to just ovsdb-server it
+# always tries to restore a flows script that was never saved, fails, and
+# systemd sees that failure as the ExecStop control process itself failing
+# (Restart=on-failure then loops: stop/start/fail, stop/start/fail...). This
+# was already broken on ExecReload before this change, just never exercised
+# until ExecStop started using the same command.
+ExecStop=/bin/sh -c '/usr/share/openvswitch/scripts/ovs-ctl --no-ovs-vswitchd --no-monitor stop; /usr/share/openvswitch/scripts/ovs-ctl --no-ovs-vswitchd --no-monitor --system-id=random --no-record-hostname start $OVS_CTL_OPTS'
+ExecReload=/bin/sh -c '/usr/share/openvswitch/scripts/ovs-ctl --no-ovs-vswitchd --no-monitor stop; /usr/share/openvswitch/scripts/ovs-ctl --no-ovs-vswitchd --no-monitor --system-id=random --no-record-hostname start $OVS_CTL_OPTS'

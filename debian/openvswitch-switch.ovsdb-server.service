@@ -20,9 +20,19 @@ ExecStart=/usr/share/openvswitch/scripts/ovs-ctl \
 # ExecReload) should go through the same graceful path ExecReload already
 # uses, rather than tearing the database down and relying on whatever starts
 # it next to reconstruct everything from scratch.
+#
+# --system-id=random matches ExecStart above: without it, ovs-ctl fails with
+# "system ID not configured" on a from-scratch db (systemd then sees ExecStop
+# itself as a failed control process and, with Restart=on-failure, loops),
+# and every attempt re-runs "ovsdb-tool create" on an empty database -
+# silently discarding every Bridge/Port/Interface row and leaving nothing for
+# the next ovs-vswitchd start to reconstruct from. This was already wrong on
+# ExecReload before this change; it just never got exercised.
 ExecStop=/usr/share/openvswitch/scripts/ovs-ctl --no-ovs-vswitchd \
+          --no-monitor --system-id=random \
           --no-record-hostname \
-          --no-monitor restart $OVS_CTL_OPTS
+          restart $OVS_CTL_OPTS
 ExecReload=/usr/share/openvswitch/scripts/ovs-ctl --no-ovs-vswitchd \
+          --no-monitor --system-id=random \
           --no-record-hostname \
-          --no-monitor restart $OVS_CTL_OPTS
+          restart $OVS_CTL_OPTS

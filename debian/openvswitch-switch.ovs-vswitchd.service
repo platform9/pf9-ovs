@@ -52,6 +52,21 @@ EnvironmentFile=-/etc/default/openvswitch-switch
 # by an interpreter, not run as a standalone program, which is exactly what
 # the original restore_flows()/action() plumbing does under the hood for the
 # /tmp-based mktemp path ovs-ctl's own "restart" command uses.
+#
+# The saved script now starts with "set -e" (see ovs-save), so its exit
+# status is a real signal - but only if something here actually looks at it.
+# This used to run it, delete it, and clear flow-restore-wait unconditionally
+# in sequence, so a failed replay was indistinguishable from a successful one
+# from outside: vswitchd was left believing it's fully up (flow-restore-wait
+# cleared) with whatever partial, possibly-empty table the failed script got
+# through before dying, and the one artifact that could explain why (the
+# script itself) was already deleted. On failure this instead: leaves
+# flow-restore-wait set, so ofproto keeps withholding the "normal operation"
+# signal rather than silently presenting a broken table as ready; keeps the
+# saved script on disk (prefixed .failed, so a later successful restart's
+# ExecStop doesn't just overwrite the evidence) for whoever investigates; and
+# fails ExecStart itself, so systemd marks the unit failed and Restart=on-
+# failure governs retry instead of this looking like a clean start.
 Environment=OVS_SAVED_FLOWS=/run/openvswitch/vswitchd-saved-flows.sh
 ExecStart=/bin/sh -c '\
           if [ -s "$OVS_SAVED_FLOWS" ]; then \
@@ -61,8 +76,15 @@ ExecStart=/bin/sh -c '\
               --no-monitor --system-id=random --no-record-hostname \
               start $OVS_CTL_OPTS || exit 1; \
           if [ -s "$OVS_SAVED_FLOWS" ]; then \
-              sh "$OVS_SAVED_FLOWS"; \
-              rm -f "$OVS_SAVED_FLOWS"; \
+              if sh "$OVS_SAVED_FLOWS"; then \
+                  rm -f "$OVS_SAVED_FLOWS"; \
+              else \
+                  rc=$?; \
+                  logger -p daemon.err -t ovs-vswitchd-restore \
+                      "flow restore script $OVS_SAVED_FLOWS failed (exit $rc) - leaving flow-restore-wait set and preserving it at $OVS_SAVED_FLOWS.failed for inspection"; \
+                  mv -f "$OVS_SAVED_FLOWS" "$OVS_SAVED_FLOWS.failed"; \
+                  exit "$rc"; \
+              fi; \
           fi; \
           /usr/bin/ovs-vsctl --no-wait --if-exists remove open_vswitch . \
               other_config flow-restore-wait=true'

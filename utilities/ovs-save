@@ -122,6 +122,17 @@ save_flows () {
             ;;
     esac
 
+    # Without this, a failing command partway through the generated script
+    # (a bad add-meter, a rejected replace-flows bundle) is silently masked:
+    # the script has no error checking of its own, so it keeps going and the
+    # *last* command run - "rm -rf $workdir" below, which essentially always
+    # succeeds - becomes the exit status the caller sees, reporting a failed
+    # restore as a clean success. set -e makes the first real failure abort
+    # the script immediately, so that exit status (and the fact that
+    # $workdir is deliberately left behind on failure, unlike this cleanup
+    # on the success path, for post-mortem inspection) means what it says.
+    echo "set -e"
+
     workdir=$(mktemp -d "${TMPDIR:-/tmp}/ovs-save.XXXXXXXXXX")
     for bridge in "$@"; do
         # Get the highest enabled OpenFlow version
@@ -145,8 +156,34 @@ save_flows () {
         # lib/ofp-meter.c), a stricter floor than groups/flows' 1.4 bundle
         # gate just below, so this is gated separately.
         if [ ${ofp_version#OpenFlow} -ge 13 ]; then
+            # dump-meters prints one "meter=<id> <flags> bands=" header line
+            # per meter, followed by one "type=... rate=..." line per band -
+            # the bands are *not* on the header line. Grepping for just the
+            # "^meter=" lines (as this used to) threw every band away, always
+            # emitting a bandless "add-meter ... bands=" - OVS rejects that
+            # outright for having no bands, so the meter was never actually
+            # recreated and any flow referencing it then failed too. This
+            # instead buffers each meter's header line together with every
+            # following "type=" line up to the next "meter=" line (or EOF),
+            # joining the header directly to the first band and comma-joining
+            # any further bands - the syntax add-meter expects for multiple
+            # bands on one meter.
             ovs-ofctl -O $ofp_version dump-meters "$bridge" | \
-                grep '^meter=' | \
+                awk '
+                    /^meter=/ {
+                        if (meter != "") print meter
+                        meter = $0
+                        first = 1
+                        next
+                    }
+                    /^type=/ {
+                        if (meter == "") next
+                        if (first) { meter = meter $0; first = 0 }
+                        else { meter = meter "," $0 }
+                        next
+                    }
+                    END { if (meter != "") print meter }
+                ' | \
                 while IFS= read -r meter_line; do
                     printf "%s" "ovs-ofctl -O $ofp_version add-meter ${bridge} '"
                     printf '%s' "$meter_line"

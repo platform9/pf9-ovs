@@ -333,7 +333,8 @@ EXTRA_DIST += tests/run-oftest
 
 # Zero-loss regression tests for ovs-lib.in/ovs-save (plain shell scripts,
 # not part of the Autotest testsuite above).
-EXTRA_DIST += tests/ovs-lib-restart-exit-code-test.sh tests/ovs-save-meters-test.sh
+EXTRA_DIST += tests/ovs-lib-restart-exit-code-test.sh tests/ovs-save-meters-test.sh \
+	tests/ovs-vswitchd-service-restore-failure-test.sh
 
 # Ryu support.
 check-ryu: all

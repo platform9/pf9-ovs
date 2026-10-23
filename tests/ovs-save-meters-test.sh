@@ -57,7 +57,18 @@ case "$*" in
     --version) echo "ovs-ofctl (Open vSwitch) 3.3.6" ;;
     *dump-tlv-map*) exit 0 ;;  # empty TLV map is fine
     *dump-meters*)
-        echo "meter=1 kbps bands=type=drop rate=1000 burst_size=100"
+        # Real dump-meters output, confirmed against an actual OVS instance:
+        # the header ("meter=<id> <flags> bands=") and each band
+        # ("type=... rate=...") print on *separate* lines - never one line
+        # with the band appended, which is what this fixture used to claim
+        # and is not what dump-meters ever actually prints. A fixture that
+        # only exercised the single-line shape could not have caught the
+        # real bug it claims to guard: grepping for "^meter=" alone threw
+        # every band line away, generating a bandless add-meter that OVS
+        # rejects outright.
+        printf "OFPST_METER_CONFIG reply (OF1.3) (xid=0x2):\n"
+        printf "meter=1 kbps bands=\n"
+        printf "type=drop rate=1000 burst_size=100\n"
         ;;
     *dump-groups*) exit 0 ;;  # no groups in this fixture
     *dump-flows*)

@@ -684,9 +684,21 @@ force_reload_kmod () {
     # restore_flows' own exit status here: it is not the last command run
     # in this function, so without this it would otherwise be silently
     # discarded in favor of whatever runs after it.
+    #
+    # flow_restore_complete is the "we are done" signal to ofproto - calling
+    # it regardless of restore_rc told ofproto to proceed normally even on a
+    # failed restore, clearing other_config:flow-restore-wait over whatever
+    # partial table the failed script got through before dying. Only clear
+    # it on an actual success; on failure, leave it set so ofproto keeps
+    # withholding the "ready" signal rather than presenting a broken table
+    # as converged. (The script itself starts with "set -e" - see ovs-save -
+    # so restore_rc is a real signal here, not masked by a trailing command
+    # that happens to succeed regardless.)
     restore_flows
     restore_rc=$?
-    flow_restore_complete
+    if test $restore_rc = 0; then
+        flow_restore_complete
+    fi
     add_managers
 
     restore_interfaces
@@ -724,9 +736,22 @@ restart () {
     # restore_flows' own exit status here: it is not the last command run
     # in this function, so without this it would otherwise be silently
     # discarded in favor of whatever add_managers returns.
+    #
+    # flow_restore_complete is the "we are done" signal to ofproto - calling
+    # it regardless of restore_rc told ofproto to proceed normally even on a
+    # failed restore, clearing other_config:flow-restore-wait over whatever
+    # partial table the failed script got through before dying. Only clear
+    # it on an actual success; on failure, leave it set so ofproto keeps
+    # withholding the "ready" signal rather than presenting a broken table
+    # as converged. This is the reload path Neutron's own config script
+    # invokes (via systemctl reload-or-restart), so a failed restoration
+    # here leaving the guard cleared would expose incomplete forwarding
+    # state even though the caller does see the non-zero exit status below.
     restore_flows
     restore_rc=$?
-    flow_restore_complete
+    if test $restore_rc = 0; then
+        flow_restore_complete
+    fi
     add_managers
     managers_rc=$?
 

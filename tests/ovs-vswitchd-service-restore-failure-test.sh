@@ -13,6 +13,16 @@
 # script got through before dying - and the one artifact that could explain
 # why was already deleted.
 #
+# A second bug followed from the first fix's own remedy: it *moved* the
+# failed script to .failed for diagnosis, which meant the *next* ExecStart -
+# whether from Restart=on-failure or a manual retry - found nothing at
+# $OVS_SAVED_FLOWS, skipped the restore block entirely as if there were
+# simply nothing to restore, and fell straight through to clearing
+# flow-restore-wait and exiting 0. Reproduced directly: a second invocation
+# right after the first failure exited successfully without restoring
+# anything. Fixed by *copying* the failure for diagnosis instead of moving
+# it, so the next attempt genuinely retries the same restore.
+#
 # This extracts the literal ExecStart= command out of the real .service
 # file (so a future edit to the unit is exercised as written, not
 # retyped here) and runs it with fakes, forcing the saved-flows script to
@@ -56,6 +66,10 @@ write_fake ovs-vsctl 'echo "$*" >> "'"$VSCTL_LOG"'"; exit 0'
 LOGGER_LOG="$WORKDIR/logger.log"
 : > "$LOGGER_LOG"
 write_fake logger 'echo "$*" >> "'"$LOGGER_LOG"'"; exit 0'
+
+flow_restore_wait_cleared() {
+    grep -q -- '--if-exists remove open_vswitch \. other_config flow-restore-wait=true' "$1"
+}
 
 RUNDIR="$WORKDIR/run/openvswitch"
 mkdir -p "$RUNDIR"
@@ -101,24 +115,31 @@ if [ "$exec_start_rc" -eq 0 ]; then
 fi
 echo "PASS: ExecStart propagated the restore failure (exit $exec_start_rc)."
 
-if grep -qx 'remove open_vswitch . other_config flow-restore-wait' "$VSCTL_LOG" \
-   || grep -q -- '--if-exists remove open_vswitch \. other_config flow-restore-wait=true' "$VSCTL_LOG"; then
+if flow_restore_wait_cleared "$VSCTL_LOG"; then
     echo "FAIL: flow-restore-wait was cleared despite the restore failing -" \
          "ofproto is left believing it's fully converged on a broken table." >&2
     exit 1
 fi
 echo "PASS: flow-restore-wait was left set after the failed restore."
 
-if [ -e "$SAVED_FLOWS" ]; then
-    echo "FAIL: the failed saved-flows script was deleted - nothing is left" \
-         "to diagnose why the restore failed." >&2
+if [ ! -e "$SAVED_FLOWS" ]; then
+    echo "FAIL: the saved-flows script was removed from its live path after" \
+         "a failed restore - the next start has nothing left to retry and" \
+         "will silently skip straight to 'success'." >&2
     exit 1
 fi
 if [ ! -e "$SAVED_FLOWS.failed" ]; then
-    echo "FAIL: expected the failed script preserved at $SAVED_FLOWS.failed" >&2
+    echo "FAIL: expected a copy of the failed script preserved at" \
+         "$SAVED_FLOWS.failed" >&2
     exit 1
 fi
-echo "PASS: the failed saved-flows script was preserved at .failed for inspection."
+if ! cmp -s "$SAVED_FLOWS" "$SAVED_FLOWS.failed"; then
+    echo "FAIL: $SAVED_FLOWS.failed does not match the live script it was" \
+         "supposedly copied from" >&2
+    exit 1
+fi
+echo "PASS: the saved-flows script stays live for retry, with a copy at" \
+     ".failed for inspection."
 
 if ! grep -q 'failed' "$LOGGER_LOG"; then
     echo "FAIL: no diagnostic logged for the restore failure" >&2
@@ -126,10 +147,38 @@ if ! grep -q 'failed' "$LOGGER_LOG"; then
 fi
 echo "PASS: the restore failure was logged."
 
-# --- Part 2: confirm the happy path still works - this fix must not make a ---
-# --- successful restore look like a failure too.                          ---
+# --- Part 2: the actual reproduction - retry the exact same (still-broken) ---
+# --- restore immediately, the way Restart=on-failure or a manual retry    ---
+# --- would, and confirm it does NOT silently "succeed".                   ---
 : > "$VSCTL_LOG"
-rm -f "$SAVED_FLOWS.failed"  # leftover from part 1, not this part's concern
+: > "$LOGGER_LOG"
+
+retry_rc=0
+env \
+    OVS_CTL_OPTS="" \
+    OVS_SAVED_FLOWS="$SAVED_FLOWS" \
+    PATH="$FAKEBIN:/bin:/usr/bin" \
+    sh -c "$exec_start" || retry_rc=$?
+
+if [ "$retry_rc" -eq 0 ]; then
+    echo "FAIL: retrying ExecStart with the same still-broken saved-flows" \
+         "script exited 0 - this is the exact bug: a retry that skips the" \
+         "restore entirely and reports success." >&2
+    exit 1
+fi
+echo "PASS: retrying with the same broken script still fails (exit $retry_rc)," \
+     "not a silent success."
+if flow_restore_wait_cleared "$VSCTL_LOG"; then
+    echo "FAIL: flow-restore-wait was cleared on the retry despite the" \
+         "restore still failing." >&2
+    exit 1
+fi
+echo "PASS: flow-restore-wait is still left set on the retry."
+
+# --- Part 3: whatever caused the failure is now resolved (a later package ---
+# --- fix, a transient condition clearing) - the *next* retry must be able ---
+# --- to genuinely succeed, not be permanently wedged by the .failed copy. ---
+: > "$VSCTL_LOG"
 cat > "$SAVED_FLOWS" <<'EOF'
 set -e
 echo "restore step ran"
@@ -146,7 +195,7 @@ if [ "$happy_rc" -ne 0 ]; then
     echo "FAIL: ExecStart exited $happy_rc for a restore script that succeeded" >&2
     exit 1
 fi
-echo "PASS: ExecStart exits 0 when the restore succeeds."
+echo "PASS: ExecStart exits 0 once a retried restore actually succeeds."
 
 if [ -e "$SAVED_FLOWS" ] || [ -e "$SAVED_FLOWS.failed" ]; then
     echo "FAIL: the saved-flows script should be deleted after a successful restore" >&2
@@ -154,7 +203,7 @@ if [ -e "$SAVED_FLOWS" ] || [ -e "$SAVED_FLOWS.failed" ]; then
 fi
 echo "PASS: the saved-flows script is cleaned up after a successful restore."
 
-if ! grep -q -- '--if-exists remove open_vswitch \. other_config flow-restore-wait=true' "$VSCTL_LOG"; then
+if ! flow_restore_wait_cleared "$VSCTL_LOG"; then
     echo "FAIL: flow-restore-wait was not cleared after a successful restore" >&2
     exit 1
 fi

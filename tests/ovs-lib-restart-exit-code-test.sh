@@ -13,6 +13,16 @@
 # caller-provided hooks (stop_ovsdb etc. - normally supplied by ovs-ctl.in/
 # ovs-systemd-reload, not ovs-lib.in itself), forces restore_flows to fail
 # via a scripted $script_flows, and asserts the failure actually surfaces.
+#
+# Also covers a second bug on the same code path: even once the exit status
+# above correctly propagated, flow_restore_complete() (the "we are done,
+# clear other_config:flow-restore-wait" signal to ofproto) was called
+# unconditionally, before ever looking at restore_rc. A caller checking the
+# exit code - which is all the first bug's fix covers - still saw a failed
+# reload, but ofproto itself had already been told to proceed normally over
+# whatever partial table the failed restore left behind. This is the reload
+# path Neutron's own config script invokes (systemctl reload-or-restart), so
+# this matters independently of what the caller does with the exit code.
 set -o pipefail
 # Deliberately not -u/-e: ovs-lib.in is a vendored script with its own
 # unguarded $OVS_* references and functions that return non-zero in cases
@@ -28,11 +38,21 @@ trap 'rm -rf "$WORKDIR"' EXIT
 
 FAKEBIN="$WORKDIR/bin"
 mkdir -p "$FAKEBIN"
-cat > "$FAKEBIN/ovs-vsctl" <<'EOF'
+VSCTL_LOG="$WORKDIR/vsctl.log"
+: > "$VSCTL_LOG"
+cat > "$FAKEBIN/ovs-vsctl" <<EOF
 #!/bin/sh
+echo "\$*" >> "$VSCTL_LOG"
 exit 0
 EOF
 chmod +x "$FAKEBIN/ovs-vsctl"
+
+# flow_restore_complete()'s exact call, so a test can assert it was or
+# wasn't made without caring about every other ovs-vsctl invocation along
+# the way (set_system_ids, add_managers, etc).
+flow_restore_wait_cleared() {
+    grep -q -- '--if-exists remove open_vswitch . other_config flow-restore-wait=true' "$1"
+}
 
 FAILING_SCRIPT="$WORKDIR/fail.sh"
 printf '#!/bin/sh\nexit 7\n' > "$FAILING_SCRIPT"
@@ -70,6 +90,36 @@ if [ "$restart_rc" -eq 0 ]; then
 fi
 echo "PASS: restart() propagated restore_flows' failure (rc=$restart_rc)."
 
+if flow_restore_wait_cleared "$VSCTL_LOG"; then
+    echo "FAIL: flow_restore_complete ran despite restore_flows failing -" \
+         "ofproto was told to proceed normally over a broken table." >&2
+    exit 1
+fi
+echo "PASS: restart() left flow-restore-wait set after the failed restore."
+
+# Confirm the fix didn't just stop calling flow_restore_complete altogether -
+# it has to still run, and clear the guard, on an actual successful restore.
+: > "$VSCTL_LOG"
+PASSING_SCRIPT="$WORKDIR/pass.sh"
+printf '#!/bin/sh\nexit 0\n' > "$PASSING_SCRIPT"
+chmod +x "$PASSING_SCRIPT"
+script_flows="$PASSING_SCRIPT"
+
+PATH="$FAKEBIN:$PATH" restart
+restart_ok_rc=$?
+
+if [ "$restart_ok_rc" -ne 0 ]; then
+    echo "FAIL: restart() returned $restart_ok_rc for a restore_flows that" \
+         "succeeded" >&2
+    exit 1
+fi
+if ! flow_restore_wait_cleared "$VSCTL_LOG"; then
+    echo "FAIL: flow_restore_complete did not run after a successful" \
+         "restore - the fix over-corrected and now never clears the guard." >&2
+    exit 1
+fi
+echo "PASS: restart() clears flow-restore-wait after a successful restore."
+
 # --- Part 2: the debian/ovs-systemd-reload wrapper on top of it ---
 # Runs the real wrapper script (not sourced) with the same fakes, so its own
 # exit code - the one systemd and Neutron's check=True actually see - is
@@ -90,6 +140,7 @@ mkdir -p "$DEBIAN_TEST_DIR"
 cp "$OVS_SYSTEMD_RELOAD" "$DEBIAN_TEST_DIR/ovs-systemd-reload"
 cp "$OVS_LIB_IN" "$DEBIAN_TEST_DIR/ovs-lib"
 
+: > "$VSCTL_LOG"
 (
     export OVS_LOGDIR="$WORKDIR" OVS_RUNDIR="$WORKDIR/empty-rundir" \
            OVS_SYSCONFDIR="$WORKDIR" OVS_PKGDATADIR="$WORKDIR" \
@@ -108,3 +159,13 @@ if [ "$reload_rc" -eq 0 ]; then
     exit 1
 fi
 echo "PASS: ovs-systemd-reload propagated the failure (exit $reload_rc)."
+
+if flow_restore_wait_cleared "$VSCTL_LOG"; then
+    echo "FAIL: flow_restore_complete ran via ovs-systemd-reload despite" \
+         "restore_flows failing - this is the actual reload path Neutron's" \
+         "config script invokes, so ofproto was told to proceed normally" \
+         "over a broken table regardless of what the caller does with the" \
+         "exit code." >&2
+    exit 1
+fi
+echo "PASS: ovs-systemd-reload left flow-restore-wait set after the failed restore."

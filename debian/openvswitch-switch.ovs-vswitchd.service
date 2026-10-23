@@ -62,11 +62,22 @@ EnvironmentFile=-/etc/default/openvswitch-switch
 # through before dying, and the one artifact that could explain why (the
 # script itself) was already deleted. On failure this instead: leaves
 # flow-restore-wait set, so ofproto keeps withholding the "normal operation"
-# signal rather than silently presenting a broken table as ready; keeps the
-# saved script on disk (prefixed .failed, so a later successful restart's
-# ExecStop doesn't just overwrite the evidence) for whoever investigates; and
-# fails ExecStart itself, so systemd marks the unit failed and Restart=on-
-# failure governs retry instead of this looking like a clean start.
+# signal rather than silently presenting a broken table as ready; fails
+# ExecStart itself, so systemd marks the unit failed and Restart=on-failure
+# governs retry; and - this used to *move* the script to .failed, which
+# fixed the evidence-preservation problem but created a worse one: the next
+# ExecStart (whether from Restart=on-failure or a manual retry) then found
+# nothing at $OVS_SAVED_FLOWS, skipped the whole restore block as if there
+# were simply nothing to restore, and fell straight through to clearing
+# flow-restore-wait and exiting 0 - a retry that never actually retried the
+# restore reporting itself as a clean success. Confirmed by reproduction:
+# the second invocation exits 0 without restoring anything. Fixed by
+# *copying* the failure for diagnosis instead, and leaving the original file
+# in place - so the next ExecStart genuinely retries the same restore, and
+# either truly succeeds (script runs, flows restored, both the live file and
+# any leftover .failed from an earlier attempt deleted, flow-restore-wait
+# cleared) or truly fails again (same handling, same non-zero exit) rather
+# than silently skipping it.
 Environment=OVS_SAVED_FLOWS=/run/openvswitch/vswitchd-saved-flows.sh
 ExecStart=/bin/sh -c '\
           if [ -s "$OVS_SAVED_FLOWS" ]; then \
@@ -77,12 +88,12 @@ ExecStart=/bin/sh -c '\
               start $OVS_CTL_OPTS || exit 1; \
           if [ -s "$OVS_SAVED_FLOWS" ]; then \
               if sh "$OVS_SAVED_FLOWS"; then \
-                  rm -f "$OVS_SAVED_FLOWS"; \
+                  rm -f "$OVS_SAVED_FLOWS" "$OVS_SAVED_FLOWS.failed"; \
               else \
                   rc=$?; \
+                  cp -f "$OVS_SAVED_FLOWS" "$OVS_SAVED_FLOWS.failed"; \
                   logger -p daemon.err -t ovs-vswitchd-restore \
-                      "flow restore script $OVS_SAVED_FLOWS failed (exit $rc) - leaving flow-restore-wait set and preserving it at $OVS_SAVED_FLOWS.failed for inspection"; \
-                  mv -f "$OVS_SAVED_FLOWS" "$OVS_SAVED_FLOWS.failed"; \
+                      "flow restore script $OVS_SAVED_FLOWS failed (exit $rc) - leaving flow-restore-wait set, leaving the script in place to retry on the next start, and copying it to $OVS_SAVED_FLOWS.failed for inspection"; \
                   exit "$rc"; \
               fi; \
           fi; \

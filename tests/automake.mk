@@ -335,7 +335,8 @@ EXTRA_DIST += tests/run-oftest
 # not part of the Autotest testsuite above).
 EXTRA_DIST += tests/ovs-lib-restart-exit-code-test.sh tests/ovs-save-meters-test.sh \
 	tests/ovs-vswitchd-service-restore-failure-test.sh \
-	tests/ovs-reload-double-restore-test.sh
+	tests/ovs-reload-double-restore-test.sh \
+	tests/ovs-reload-force-kmod-test.sh
 
 # Ryu support.
 check-ryu: all

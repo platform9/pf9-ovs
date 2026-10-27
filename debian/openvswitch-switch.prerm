@@ -3,7 +3,7 @@
 set -e
 
 case "$1" in
-    remove|deconfigure)
+    remove)
         # ovs-vswitchd.service's ExecStop deliberately preserves the kernel
         # datapath/flows/ports across any upgrade-driven stop+start (saves
         # flows, then does a plain "ovs-appctl ... exit" with no --cleanup -
@@ -38,6 +38,25 @@ case "$1" in
             /usr/share/openvswitch/scripts/ovs-ctl stop || true
         fi
 
+        update-alternatives --remove ovs-vswitchd /usr/lib/openvswitch-switch/ovs-vswitchd
+
+        if [ -x /usr/lib/openvswitch-switch/ovs-vswitchd-dpdk ]; then
+            update-alternatives --remove ovs-vswitchd /usr/lib/openvswitch-switch/ovs-vswitchd-dpdk
+        fi
+        ;;
+
+    deconfigure)
+        # Unlike "remove", this is transient: dpkg deconfigures a package
+        # (without removing it) to break a conflict/dependency cycle while
+        # resolving some other package's install, and expects to reconfigure
+        # it again shortly after. The datapath/flow/port state ExecStop
+        # already preserves must NOT be torn down here - doing the same real
+        # "exit --cleanup" the "remove" case above does would cause exactly
+        # the packet loss this whole mechanism exists to avoid, for an
+        # operation that was never actually an uninstall. Only deregister
+        # the alternative, the same standard debhelper idiom "remove" above
+        # also needs - the package stops being "configured" either way, but
+        # only "remove" stops being installed.
         update-alternatives --remove ovs-vswitchd /usr/lib/openvswitch-switch/ovs-vswitchd
 
         if [ -x /usr/lib/openvswitch-switch/ovs-vswitchd-dpdk ]; then

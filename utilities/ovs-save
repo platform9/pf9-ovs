@@ -138,10 +138,28 @@ save_flows () {
         # Get the highest enabled OpenFlow version
         ofp_version=$(get_highest_ofp_version "$bridge")
 
+        # Every dump below is captured to a raw file first, with its own
+        # exit status checked explicitly, rather than piped straight into
+        # awk/sed: this script has no "set -e"/pipefail of its own (its
+        # shebang is /bin/sh, typically dash, which doesn't support
+        # pipefail anyway, and "set -e" wouldn't help a pipeline's upstream
+        # stage either way), so a dropped vconn or any other failure
+        # partway through a dump previously went completely unnoticed -
+        # the pipeline's exit status is only its last (awk/sed) stage's,
+        # which almost always succeeds even on empty/truncated input. This
+        # makes ovs-save's own exit status the real, checkable signal
+        # callers need (see ExecStop's "ovs-save ... > $tmp && mv" gate in
+        # openvswitch-switch.ovs-vswitchd.service) instead of silently
+        # publishing a plausible-looking but incomplete capture.
+        if ! ovs-ofctl dump-tlv-map ${bridge} -O $ofp_version \
+                > "$workdir/$bridge.tlv-map.raw"; then
+            echo "$0: dump-tlv-map failed for $bridge" >&2
+            exit 1
+        fi
         printf "%s" "ovs-ofctl -O $ofp_version add-tlv-map ${bridge} '"
-        ovs-ofctl dump-tlv-map ${bridge} -O $ofp_version | \
         awk '/^  *0x/ {if (cnt != 0) printf ","; \
-             cnt++;printf "{class="$1",type="$2",len="$3"}->"$4}'
+             cnt++;printf "{class="$1",type="$2",len="$3"}->"$4}' \
+            "$workdir/$bridge.tlv-map.raw"
         echo "'"
 
         # Meters can't be included in the OpenFlow 1.4 bundle transaction
@@ -156,6 +174,11 @@ save_flows () {
         # lib/ofp-meter.c), a stricter floor than groups/flows' 1.4 bundle
         # gate just below, so this is gated separately.
         if [ ${ofp_version#OpenFlow} -ge 13 ]; then
+            if ! ovs-ofctl -O $ofp_version dump-meters "$bridge" \
+                    > "$workdir/$bridge.meters.raw"; then
+                echo "$0: dump-meters failed for $bridge" >&2
+                exit 1
+            fi
             # dump-meters prints one "meter=<id> <flags> bands=" header line
             # per meter, followed by one "type=... rate=..." line per band -
             # the bands are *not* on the header line. Grepping for just the
@@ -168,22 +191,21 @@ save_flows () {
             # joining the header directly to the first band and comma-joining
             # any further bands - the syntax add-meter expects for multiple
             # bands on one meter.
-            ovs-ofctl -O $ofp_version dump-meters "$bridge" | \
-                awk '
-                    /^meter=/ {
-                        if (meter != "") print meter
-                        meter = $0
-                        first = 1
-                        next
-                    }
-                    /^type=/ {
-                        if (meter == "") next
-                        if (first) { meter = meter $0; first = 0 }
-                        else { meter = meter "," $0 }
-                        next
-                    }
-                    END { if (meter != "") print meter }
-                ' | \
+            awk '
+                /^meter=/ {
+                    if (meter != "") print meter
+                    meter = $0
+                    first = 1
+                    next
+                }
+                /^type=/ {
+                    if (meter == "") next
+                    if (first) { meter = meter $0; first = 0 }
+                    else { meter = meter "," $0 }
+                    next
+                }
+                END { if (meter != "") print meter }
+            ' "$workdir/$bridge.meters.raw" | \
                 while IFS= read -r meter_line; do
                     printf "%s" "ovs-ofctl -O $ofp_version add-meter ${bridge} '"
                     printf '%s' "$meter_line"
@@ -200,19 +222,27 @@ save_flows () {
         echo "ovs-ofctl -O $ofp_version replace-flows ${bridge} \
               \"$workdir/$bridge.flows.dump\" ${bundle}"
 
-        ovs-ofctl -O $ofp_version dump-groups "$bridge" | \
-            sed -e '/^OFPST_GROUP_DESC/d' \
-                -e '/^NXST_GROUP_DESC/d' > \
-                "$workdir/$bridge.groups.dump"
+        if ! ovs-ofctl -O $ofp_version dump-groups "$bridge" \
+                > "$workdir/$bridge.groups.raw"; then
+            echo "$0: dump-groups failed for $bridge" >&2
+            exit 1
+        fi
+        sed -e '/^OFPST_GROUP_DESC/d' \
+            -e '/^NXST_GROUP_DESC/d' \
+            "$workdir/$bridge.groups.raw" > "$workdir/$bridge.groups.dump"
 
-        ovs-ofctl -O $ofp_version dump-flows --no-names --no-stats "$bridge" | \
-            sed -e '/NXST_FLOW/d' \
-                -e '/OFPST_FLOW/d' \
-                -e 's/\(idle\|hard\)_age=[^,]*,//g' \
-                -e 's/igmp_type/tp_src/g' \
-                -e 's/igmp_code/tp_dst/g' \
-                -e 's/igmp/ip,nw_proto=2/g' > \
-                "$workdir/$bridge.flows.dump"
+        if ! ovs-ofctl -O $ofp_version dump-flows --no-names --no-stats "$bridge" \
+                > "$workdir/$bridge.flows.raw"; then
+            echo "$0: dump-flows failed for $bridge" >&2
+            exit 1
+        fi
+        sed -e '/NXST_FLOW/d' \
+            -e '/OFPST_FLOW/d' \
+            -e 's/\(idle\|hard\)_age=[^,]*,//g' \
+            -e 's/igmp_type/tp_src/g' \
+            -e 's/igmp_code/tp_dst/g' \
+            -e 's/igmp/ip,nw_proto=2/g' \
+            "$workdir/$bridge.flows.raw" > "$workdir/$bridge.flows.dump"
     done
     echo "rm -rf \"$workdir\""
 }

@@ -78,10 +78,23 @@ EnvironmentFile=-/etc/default/openvswitch-switch
 # any leftover .failed from an earlier attempt deleted, flow-restore-wait
 # cleared) or truly fails again (same handling, same non-zero exit) rather
 # than silently skipping it.
+#
+# Arming flow-restore-wait itself must also be checked, not just the replay
+# that follows it: without the "|| exit 1" below, a failure here (e.g.
+# ovsdb-server not yet reachable) was silently ignored and execution fell
+# straight through to starting the daemon anyway - with nothing holding the
+# datapath, ofproto does its normal startup flush-and-go-live and can start
+# forwarding/accepting controller connections before the replay step even
+# runs, which is the exact window this whole mechanism exists to close.
 Environment=OVS_SAVED_FLOWS=/run/openvswitch/vswitchd-saved-flows.sh
 ExecStart=/bin/sh -c '\
           if [ -s "$OVS_SAVED_FLOWS" ]; then \
-              /usr/bin/ovs-vsctl --no-wait set open_vswitch . other_config:flow-restore-wait=true; \
+              /usr/bin/ovs-vsctl --no-wait set open_vswitch . \
+                  other_config:flow-restore-wait=true || { \
+                  logger -p daemon.err -t ovs-vswitchd-restore \
+                      "failed to arm flow-restore-wait with a saved-flows snapshot pending - aborting start rather than letting the new daemon come up unprotected"; \
+                  exit 1; \
+              }; \
           fi; \
           /usr/share/openvswitch/scripts/ovs-ctl --no-ovsdb-server \
               --no-monitor --system-id=random --no-record-hostname \
@@ -99,14 +112,31 @@ ExecStart=/bin/sh -c '\
           fi; \
           /usr/bin/ovs-vsctl --no-wait --if-exists remove open_vswitch . \
               other_config flow-restore-wait=true'
+# ovs-save is captured to a .tmp file and published with "mv" only once it
+# exits successfully, rather than redirecting straight into $OVS_SAVED_FLOWS:
+# ovs-save has no "set -e"/pipefail of its own, so a mid-capture failure (a
+# dropped vconn, a dump-flows subprocess error partway through the bridge
+# list) can leave a truncated file that is nonetheless syntactically valid
+# up to the point it stopped - ExecStart's "[ -s ... ]" only checks
+# non-empty, not complete, and a script that is valid-but-partial runs to
+# completion and exits 0, silently restoring less than what was actually
+# there. On failure this instead discards the .tmp file and leaves no
+# snapshot published at all, so the next start correctly finds nothing to
+# restore rather than a plausible-looking partial one.
 ExecStop=/bin/sh -c '\
-          rm -f "$OVS_SAVED_FLOWS"; \
+          rm -f "$OVS_SAVED_FLOWS" "$OVS_SAVED_FLOWS.tmp"; \
           if [ -e /run/openvswitch/ovs-vswitchd.pid ] && \
              kill -0 "$(cat /run/openvswitch/ovs-vswitchd.pid)" 2>/dev/null; then \
               bridges=$(/usr/bin/ovs-vsctl -- --real list-br); \
               if [ -n "$bridges" ]; then \
-                  /usr/share/openvswitch/scripts/ovs-save save-flows $bridges \
-                      > "$OVS_SAVED_FLOWS"; \
+                  if /usr/share/openvswitch/scripts/ovs-save save-flows $bridges \
+                      > "$OVS_SAVED_FLOWS.tmp"; then \
+                      mv -f "$OVS_SAVED_FLOWS.tmp" "$OVS_SAVED_FLOWS"; \
+                  else \
+                      logger -p daemon.err -t ovs-vswitchd-save \
+                          "ovs-save failed capturing flows for bridges: $bridges - a partial capture could look complete and silently drop flows on the next restore, so this stop proceeds with no saved-flows snapshot at all instead of publishing it"; \
+                      rm -f "$OVS_SAVED_FLOWS.tmp"; \
+                  fi; \
               fi; \
           fi; \
           exec /usr/share/openvswitch/scripts/ovs-ctl --no-ovsdb-server \

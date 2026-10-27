@@ -4,14 +4,36 @@ set -e
 
 case "$1" in
     remove|deconfigure)
-        # ovs-vswitchd.service/ovsdb-server.service's ExecStop now runs the
-        # same graceful restart cycle as ExecReload, deliberately preserving
-        # the datapath/flows/ports across any upgrade-driven stop+start. When
-        # the package is actually going away that preserved state would be
-        # left behind as garbage (stale bridges, kernel datapath flows,
-        # ports), so stop everything for real here first: a plain ovs-ctl
-        # stop, bypassing the unit's own graceful ExecStop, runs ofproto's
-        # normal exit-time cleanup and tears the datapath down.
+        # ovs-vswitchd.service's ExecStop deliberately preserves the kernel
+        # datapath/flows/ports across any upgrade-driven stop+start (saves
+        # flows, then does a plain "ovs-appctl ... exit" with no --cleanup -
+        # see vswitchd.c's exit unixctl command and bridge_exit()/
+        # bridge_destroy(), which only delete the datapath when --cleanup is
+        # passed). ovsdb-server.service has no datapath/flow state of its
+        # own to preserve; its ExecReload is "ovs-ctl ... start", which -
+        # same codepath as any other start - just finds the daemon already
+        # running and leaves it alone (do_start_ovsdb()'s "already running"
+        # branch is a pure no-op, not a reload or restart of anything).
+        #
+        # When the package is actually going away, ovs-vswitchd's preserved
+        # datapath state would be left behind as garbage (stale bridges,
+        # kernel datapath flows, ports) - and a plain "ovs-ctl stop" does
+        # NOT fix that: it's the exact same no-"--cleanup" "exit" call
+        # ExecStop already makes, so it preserves the datapath here too,
+        # same as a restart would. Real teardown needs the running daemon
+        # told "exit --cleanup" directly - ovs-ctl has no flag that passes
+        # that through - so this talks to it over its control socket itself,
+        # using the same $rundir/ovs-vswitchd.$pid.ctl naming ovs-lib.in's
+        # own stop_daemon() uses, before falling through to the normal
+        # ovs-ctl stop for ovsdb-server (and as a no-op safety net for
+        # ovs-vswitchd, now already stopped).
+        if [ -e /run/openvswitch/ovs-vswitchd.pid ]; then
+            vswitchd_pid=$(cat /run/openvswitch/ovs-vswitchd.pid 2>/dev/null) || vswitchd_pid=
+            if [ -n "$vswitchd_pid" ] && kill -0 "$vswitchd_pid" 2>/dev/null; then
+                ovs-appctl -t "/run/openvswitch/ovs-vswitchd.$vswitchd_pid.ctl" \
+                    exit --cleanup || true
+            fi
+        fi
         if [ -x /usr/share/openvswitch/scripts/ovs-ctl ]; then
             /usr/share/openvswitch/scripts/ovs-ctl stop || true
         fi

@@ -338,7 +338,8 @@ EXTRA_DIST += tests/ovs-lib-restart-exit-code-test.sh tests/ovs-save-meters-test
 	tests/ovs-vswitchd-service-save-capture-failure-test.sh \
 	tests/ovs-vswitchd-service-arm-wait-failure-test.sh \
 	tests/ovs-reload-double-restore-test.sh \
-	tests/ovs-reload-force-kmod-test.sh
+	tests/ovs-reload-force-kmod-test.sh \
+	tests/openvswitch-switch-prerm-cleanup-test.sh
 
 # Ryu support.
 check-ryu: all

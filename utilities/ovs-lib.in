@@ -608,8 +608,18 @@ flow_restore_complete () {
 }
 
 restore_flows () {
-    [ -x "${script_flows}" ] && \
-        action "Restoring saved flows" "${script_flows}"
+    # "No saved-flows script" (an empty host, or any restart where nothing
+    # was running to save in the first place) is not a failure - without
+    # this, "[ -x ... ] && action ..." short-circuits and returns the test's
+    # own false, indistinguishable from "the restore itself failed". That
+    # made restart() treat "nothing to restore" as a genuine failure: it
+    # never called flow_restore_complete, leaving other_config:flow-restore-
+    # wait=true set forever - ofproto would withhold normal forwarding
+    # indefinitely for a host that was never actually broken. Mirrors the
+    # same early-return restore_interfaces() already uses below for the
+    # identical "nothing to restore" case.
+    [ ! -x "${script_flows}" ] && return 0
+    action "Restoring saved flows" "${script_flows}"
 }
 
 restore_interfaces () {

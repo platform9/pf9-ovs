@@ -130,6 +130,33 @@ if ! flow_restore_wait_cleared "$VSCTL_LOG"; then
 fi
 echo "PASS: restart() clears flow-restore-wait after a successful restore."
 
+# Nothing-to-restore (an empty host, or any restart where nothing was
+# running to save in the first place) must be treated the same as a
+# successful restore, not a failed one. Before the fix,
+# "[ -x "$script_flows" ] && action ..." short-circuited on a missing
+# script and returned the test's own false - indistinguishable from the
+# restore itself failing, so restart() never called flow_restore_complete
+# and left flow-restore-wait=true set forever.
+: > "$VSCTL_LOG"
+script_flows="$WORKDIR/does-not-exist.sh"
+
+PATH="$FAKEBIN:$PATH" restart
+restart_noop_rc=$?
+
+if [ "$restart_noop_rc" -ne 0 ]; then
+    echo "FAIL: restart() returned $restart_noop_rc when there was no" \
+         "saved-flows script at all - nothing to restore is not a failure." >&2
+    exit 1
+fi
+if ! flow_restore_wait_cleared "$VSCTL_LOG"; then
+    echo "FAIL: flow_restore_complete did not run when there was nothing to" \
+         "restore - flow-restore-wait would stay set forever, and ofproto" \
+         "would withhold normal forwarding indefinitely on a host that was" \
+         "never actually broken." >&2
+    exit 1
+fi
+echo "PASS: restart() treats 'nothing to restore' as success, not failure."
+
 # --- Part 2: the debian/ovs-systemd-reload wrapper on top of it ---
 # Runs the real wrapper script (not sourced) so its own exit code - the one
 # systemd and Neutron's check=True actually see - is exercised end to end.

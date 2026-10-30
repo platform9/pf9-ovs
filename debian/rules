@@ -113,8 +113,15 @@ execute_after_dh_install:
 			$(CURDIR)/debian/openvswitch-test/usr/lib/python$$pyvers/dist-packages/ovstest; \
 	done
 
+# --no-restart-after-upgrade: don't let dpkg cold-restart openvswitch-switch
+# (and, via PartOf=, ovsdb-server/ovs-vswitchd/ovs-record-hostname) outside the
+# flow-restore-wait-aware reload path. pf9-neutron's ovn-controller config
+# script already detects a real OVS version change and performs a single
+# controlled 'systemctl reload-or-restart', which goes through ovs-ctl's
+# save/restore-flows logic - debhelper's own restart-on-upgrade would race
+# that and can cold-restart the datapath before flows are saved.
 override_dh_installinit:
-	dh_installinit --restart-after-upgrade
+	dh_installinit --no-restart-after-upgrade
 	dh_installinit -popenvswitch-switch --name=ovsdb-server --no-start
 	dh_installinit -popenvswitch-switch --name=ovs-vswitchd --no-start
 	dh_installinit -popenvswitch-switch --name=ovs-record-hostname --no-start
@@ -123,7 +130,32 @@ override_dh_installsystemd:
 	dh_installsystemd -popenvswitch-switch --name=ovsdb-server --no-start
 	dh_installsystemd -popenvswitch-switch --name=ovs-vswitchd --no-start
 	dh_installsystemd -popenvswitch-switch --name=ovs-record-hostname --no-start
-	dh_installsystemd --restart-after-upgrade -Xovs-vswitchd.service -Xovsdb-server.service -Xovs-record-hostname.service
+	dh_installsystemd --no-restart-after-upgrade -Xovs-vswitchd.service -Xovsdb-server.service -Xovs-record-hostname.service
+
+# This package is debhelper-compat (= 10). At compat 10 (unlike 11+), dh's
+# default sequence calls the separate legacy dh_systemd_enable/dh_systemd_start
+# commands, not dh_installsystemd above - that override is dead code here,
+# never invoked (harmless to leave for whenever this bumps to compat 11+,
+# where dh_installsystemd becomes the live step instead). dh_systemd_start has
+# no --no-start equivalent, so excluding these three units is the only way to
+# keep it from triggering 'deb-systemd-invoke restart' on upgrade - which it
+# otherwise does unconditionally for every systemd unit the package installs,
+# init.d equivalent or not (the compat(11) gate that would normally defer to
+# invoke-rc.d for those is not active below compat 11).
+#
+# dh_systemd_start's own -X exclusion only filters the *initial* unit list -
+# openvswitch-switch.service's Also=ovs-record-hostname.service directive
+# gets expanded and re-added to the queue AFTER that filtering runs, with no
+# re-check against -X. So ovs-record-hostname.service must stay excluded (it
+# would otherwise leak back in) *and* openvswitch-switch.service itself must
+# be excluded too (the only thing left pulling it in) - but only from
+# dh_systemd_start, not dh_systemd_enable: it should still get enabled so it
+# starts on boot, just not explicitly started/restarted by this postinst.
+override_dh_systemd_enable:
+	dh_systemd_enable -Xovs-vswitchd.service -Xovsdb-server.service -Xovs-record-hostname.service
+
+override_dh_systemd_start:
+	dh_systemd_start --no-restart-after-upgrade -Xopenvswitch-switch.service -Xovs-vswitchd.service -Xovsdb-server.service -Xovs-record-hostname.service
 
 override_dh_strip:
 	dh_strip --dbgsym-migration='openvswitch-dbg (<< 2.17~)'

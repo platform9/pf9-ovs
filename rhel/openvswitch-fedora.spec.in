@@ -49,6 +49,13 @@ Summary: Open vSwitch
 Group: System Environment/Daemons
 URL: http://www.openvswitch.org/
 Version: @VERSION@
+# pf9: the commit this package was built from, as a virtual provide
+# (pass --define 'pf9_source_sha <sha>' to rpmbuild). The version string is
+# static, so pf9-yum compares this between the installed and incoming
+# package to decide whether OVS needs replacing. Query it with
+# `rpm -q --provides openvswitch | grep ^pf9-source-sha`. Omitted when the
+# macro is not defined (= "not a SHA-stamped build").
+%{?pf9_source_sha:Provides: pf9-source-sha(%{pf9_source_sha})}
 
 # Nearly all of openvswitch is ASL 2.0.  The bugtool is LGPLv2+, and the
 # lib/sflow*.[ch] files are SISSL
@@ -114,6 +121,7 @@ License: ASL 2.0
 BuildArch: noarch
 Requires: python3
 Suggests: python3-netaddr python3-pyparsing python3-unbound
+%{?pf9_source_sha:Provides: pf9-source-sha(%{pf9_source_sha})}
 %{?python_provide:%python_provide python3-openvswitch = %{version}-%{release}}
 
 %description -n python3-openvswitch

@@ -157,6 +157,21 @@ override_dh_systemd_enable:
 override_dh_systemd_start:
 	dh_systemd_start --no-restart-after-upgrade -Xopenvswitch-switch.service -Xovs-vswitchd.service -Xovsdb-server.service -Xovs-record-hostname.service
 
+# Stamp the pf9-ovs source commit into the control file of every binary
+# package as 'Pf9-Source-Sha'. pf9-apt compares this field between the
+# installed and incoming OVS packages to decide whether OVS needs upgrading
+# when the version string is unchanged. PF9_OVS_SHA wins (for builds from a
+# tree without .git); otherwise ask git. If neither works the field is
+# omitted, which pf9-apt treats as "not a SHA-stamped build".
+PF9_OVS_SHA ?= $(shell git -C $(CURDIR) rev-parse HEAD 2>/dev/null)
+
+override_dh_gencontrol:
+ifneq (,$(strip $(PF9_OVS_SHA)))
+	dh_gencontrol -- -DPf9-Source-Sha=$(strip $(PF9_OVS_SHA))
+else
+	dh_gencontrol
+endif
+
 override_dh_strip:
 	dh_strip --dbgsym-migration='openvswitch-dbg (<< 2.17~)'
 

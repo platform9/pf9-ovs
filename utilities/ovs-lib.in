@@ -608,8 +608,18 @@ flow_restore_complete () {
 }
 
 restore_flows () {
-    [ -x "${script_flows}" ] && \
-        action "Restoring saved flows" "${script_flows}"
+    # "No saved-flows script" (an empty host, or any restart where nothing
+    # was running to save in the first place) is not a failure - without
+    # this, "[ -x ... ] && action ..." short-circuits and returns the test's
+    # own false, indistinguishable from "the restore itself failed". That
+    # made restart() treat "nothing to restore" as a genuine failure: it
+    # never called flow_restore_complete, leaving other_config:flow-restore-
+    # wait=true set forever - ofproto would withhold normal forwarding
+    # indefinitely for a host that was never actually broken. Mirrors the
+    # same early-return restore_interfaces() already uses below for the
+    # identical "nothing to restore" case.
+    [ ! -x "${script_flows}" ] && return 0
+    action "Restoring saved flows" "${script_flows}"
 }
 
 restore_interfaces () {
@@ -680,15 +690,33 @@ force_reload_kmod () {
     flow_restore_wait
     start_forwarding || return 1
 
-    # Restore saved flows and inform vswitchd that we are done.
+    # Restore saved flows and inform vswitchd that we are done. Capture
+    # restore_flows' own exit status here: it is not the last command run
+    # in this function, so without this it would otherwise be silently
+    # discarded in favor of whatever runs after it.
+    #
+    # flow_restore_complete is the "we are done" signal to ofproto - calling
+    # it regardless of restore_rc told ofproto to proceed normally even on a
+    # failed restore, clearing other_config:flow-restore-wait over whatever
+    # partial table the failed script got through before dying. Only clear
+    # it on an actual success; on failure, leave it set so ofproto keeps
+    # withholding the "ready" signal rather than presenting a broken table
+    # as converged. (The script itself starts with "set -e" - see ovs-save -
+    # so restore_rc is a real signal here, not masked by a trailing command
+    # that happens to succeed regardless.)
     restore_flows
-    flow_restore_complete
+    restore_rc=$?
+    if test $restore_rc = 0; then
+        flow_restore_complete
+    fi
     add_managers
 
     restore_interfaces
 
     action "Finding processes on dead interfaces" timeout 5 \
         "$datadir/scripts/ovs-check-dead-ifs" || true
+
+    return $restore_rc
 }
 
 ## ------- ##
@@ -714,8 +742,31 @@ restart () {
     flow_restore_wait
     start_forwarding || return 1
 
-    # Restore saved flows and inform vswitchd that we are done.
+    # Restore saved flows and inform vswitchd that we are done. Capture
+    # restore_flows' own exit status here: it is not the last command run
+    # in this function, so without this it would otherwise be silently
+    # discarded in favor of whatever add_managers returns.
+    #
+    # flow_restore_complete is the "we are done" signal to ofproto - calling
+    # it regardless of restore_rc told ofproto to proceed normally even on a
+    # failed restore, clearing other_config:flow-restore-wait over whatever
+    # partial table the failed script got through before dying. Only clear
+    # it on an actual success; on failure, leave it set so ofproto keeps
+    # withholding the "ready" signal rather than presenting a broken table
+    # as converged. This is the reload path Neutron's own config script
+    # invokes (via systemctl reload-or-restart), so a failed restoration
+    # here leaving the guard cleared would expose incomplete forwarding
+    # state even though the caller does see the non-zero exit status below.
     restore_flows
-    flow_restore_complete
+    restore_rc=$?
+    if test $restore_rc = 0; then
+        flow_restore_complete
+    fi
     add_managers
+    managers_rc=$?
+
+    if test $restore_rc != 0; then
+        return $restore_rc
+    fi
+    return $managers_rc
 }

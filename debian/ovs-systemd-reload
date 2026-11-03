@@ -40,10 +40,53 @@ add_managers() {
     :
 }
 
+# ovs-lib.in's restart()/force_reload_kmod() wrap stop_forwarding/
+# start_forwarding above with their own save_flows_if_required/
+# flow_restore_wait/restore_flows/flow_restore_complete cycle - correct when
+# those hooks are ovs-ctl's own direct stop_daemon/start_daemon calls (no
+# preservation of their own), which is the only context ovs-lib.in itself
+# knows about. Here they're "systemctl stop/start ovsdb-server/ovs-vswitchd"
+# instead, and openvswitch-switch.ovs{db-server,-vswitchd}.service's own
+# ExecStop/ExecStart already do a complete, correct save-stop/start-restore
+# cycle of their own. Layering ovs-lib.in's cycle on top double-restores:
+# start_forwarding's systemctl call already replays the unit's own snapshot
+# and clears flow-restore-wait before returning, so restore_flows below finds
+# an already-populated bridge and fails every already-applied meter/group
+# with METER_EXISTS/GROUP_EXISTS - confirmed by reproduction, exit 1 despite
+# the reload having actually fully succeeded one layer down. Stubbing these
+# out gives the units sole ownership: all the real preservation work still
+# happens (inside start_forwarding's systemctl call), and its success or
+# failure already surfaces correctly through stop_forwarding/start_forwarding
+# themselves returning the triggered unit's own exit status - nothing above
+# needs its own restore_rc/flow_restore_wait bookkeeping on top of that.
+#
+# init_restore_scripts itself is deliberately NOT stubbed: besides
+# script_flows (now unused here), it also sets up script_interfaces, which
+# force_reload_kmod() separately uses for save_interfaces/restore_interfaces
+# - real interface/iptables config, nothing to do with flow-restore-wait or
+# the units above, and still needed since nothing at the unit level handles
+# it.
+save_flows_if_required() {
+    :
+}
+
+flow_restore_wait() {
+    :
+}
+
+flow_restore_complete() {
+    :
+}
+
+restore_flows() {
+    return 0
+}
+
 if [ "$1" = "force-reload-kmod" ]; then
     force_reload_kmod
 else
     restart
 fi
+rc=$?
 
-exit 0
+exit $rc

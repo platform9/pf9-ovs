@@ -84,7 +84,10 @@ EXTRA_DIST = \
 	.cirrus.yml \
 	.editorconfig \
 	.github/workflows/build-and-test.yml \
+	.github/workflows/pf9-revision-check.yml \
 	.readthedocs.yaml \
+	PF9_REVISION \
+	PF9_VERSIONING.md \
 	appveyor.yml \
 	boot.sh \
 	poc/builders/Vagrantfile \

@@ -1,0 +1,16 @@
+name: pf9-revision-check
+
+# Every change to packaged source must bump PF9_REVISION, otherwise hosts keep the old build.
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  revision:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: PF9_REVISION must be incremented when source changes
+        run: build-aux/pf9-check-revision.sh "origin/${{ github.base_ref }}"

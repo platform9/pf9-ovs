@@ -5,6 +5,7 @@ EXTRA_DIST += \
 	build-aux/cksum-schema-check \
 	build-aux/dist-docs \
 	build-aux/dpdkstrip.py \
+	build-aux/pf9-check-revision.sh \
 	build-aux/extract-odp-netlink-h \
 	build-aux/extract-odp-netlink-macros-h \
 	build-aux/extract-odp-netlink-windows-dp-h \

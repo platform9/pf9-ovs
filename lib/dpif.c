@@ -1160,9 +1160,9 @@ dpif_flow_dump_next(struct dpif_flow_dump_thread *thread,
 
 struct dpif_execute_helper_aux {
     struct dpif *dpif;
-    const struct flow *flow;
     int error;
-    const struct nlattr *meter_action; /* Non-NULL, if have a meter action. */
+    struct ofpbuf meter_actions;
+    struct dpif_execute orig_execute;
 };
 
 /* This is called for actions that need the context of the datapath to be
@@ -1179,10 +1179,14 @@ dpif_execute_helper_cb(void *aux_, struct dp_packet_batch *packets_,
 
     switch ((enum ovs_action_attr)type) {
     case OVS_ACTION_ATTR_METER:
-        /* Maintain a pointer to the first meter action seen. */
-        if (!aux->meter_action) {
-            aux->meter_action = action;
-        }
+        /* XXX: This code collects meter actions since the last action
+         * execution via the datapath to be executed right before the
+         * current action that needs to be executed by the datapath.
+         * This is only an approximation, but better than nothing.
+         * Fundamentally, we should have a mechanism by which the
+         * datapath could return the result of the meter action so that
+         * we could execute them at the right order. */
+        ofpbuf_put(&aux->meter_actions, action, NLA_ALIGN(action->nla_len));
         break;
 
     case OVS_ACTION_ATTR_CT:
@@ -1192,44 +1196,22 @@ dpif_execute_helper_cb(void *aux_, struct dp_packet_batch *packets_,
     case OVS_ACTION_ATTR_TUNNEL_POP:
     case OVS_ACTION_ATTR_USERSPACE:
     case OVS_ACTION_ATTR_RECIRC: {
-        struct dpif_execute execute;
-        struct ofpbuf execute_actions;
-        uint64_t stub[256 / 8];
+        struct dpif_execute execute = aux->orig_execute;
         struct pkt_metadata *md = &packet->md;
 
-        if (flow_tnl_dst_is_set(&md->tunnel) || aux->meter_action) {
-            ofpbuf_use_stub(&execute_actions, stub, sizeof stub);
-
-            if (aux->meter_action) {
-                const struct nlattr *a = aux->meter_action;
-
-                /* XXX: This code collects meter actions since the last action
-                 * execution via the datapath to be executed right before the
-                 * current action that needs to be executed by the datapath.
-                 * This is only an approximation, but better than nothing.
-                 * Fundamentally, we should have a mechanism by which the
-                 * datapath could return the result of the meter action so that
-                 * we could execute them at the right order. */
-                do {
-                    ofpbuf_put(&execute_actions, a, NLA_ALIGN(a->nla_len));
-                    /* Find next meter action before 'action', if any. */
-                    do {
-                        a = nl_attr_next(a);
-                    } while (a != action &&
-                             nl_attr_type(a) != OVS_ACTION_ATTR_METER);
-                } while (a != action);
-            }
+        if (flow_tnl_dst_is_set(&md->tunnel) || aux->meter_actions.size) {
+            struct ofpbuf *execute_actions = &aux->meter_actions;
 
             /* The Linux kernel datapath throws away the tunnel information
              * that we supply as metadata.  We have to use a "set" action to
              * supply it. */
             if (flow_tnl_dst_is_set(&md->tunnel)) {
-                odp_put_tunnel_action(&md->tunnel, &execute_actions, NULL);
+                odp_put_tunnel_action(&md->tunnel, execute_actions, NULL);
             }
-            ofpbuf_put(&execute_actions, action, NLA_ALIGN(action->nla_len));
+            ofpbuf_put(execute_actions, action, NLA_ALIGN(action->nla_len));
 
-            execute.actions = execute_actions.data;
-            execute.actions_len = execute_actions.size;
+            execute.actions = execute_actions->data;
+            execute.actions_len = execute_actions->size;
         } else {
             execute.actions = action;
             execute.actions_len = NLA_ALIGN(action->nla_len);
@@ -1250,23 +1232,17 @@ dpif_execute_helper_cb(void *aux_, struct dp_packet_batch *packets_,
         }
 
         execute.packet = packet;
-        execute.flow = aux->flow;
         execute.needs_help = false;
-        execute.probe = false;
-        execute.mtu = 0;
-        execute.hash = 0;
+
         aux->error = dpif_execute(aux->dpif, &execute);
         log_execute_message(aux->dpif, &this_module, &execute,
                             true, aux->error);
 
         dp_packet_delete(clone);
 
-        if (flow_tnl_dst_is_set(&md->tunnel) || aux->meter_action) {
-            ofpbuf_uninit(&execute_actions);
-
-            /* Do not re-use the same meters for later output actions. */
-            aux->meter_action = NULL;
-        }
+        /* Clear the 'aux->meter_actions' ofpbuf as it could have been
+         * used for sending the additional meter and/or tunnel actions. */
+        ofpbuf_clear(&aux->meter_actions);
         break;
     }
 
@@ -1303,14 +1279,20 @@ dpif_execute_helper_cb(void *aux_, struct dp_packet_batch *packets_,
 static int
 dpif_execute_with_help(struct dpif *dpif, struct dpif_execute *execute)
 {
-    struct dpif_execute_helper_aux aux = {dpif, execute->flow, 0, NULL};
+    struct dpif_execute_helper_aux aux = {
+        .dpif = dpif,
+        .error = 0,
+        .orig_execute = *execute,
+    };
     struct dp_packet_batch pb;
 
     COVERAGE_INC(dpif_execute_with_help);
 
+    ofpbuf_init(&aux.meter_actions, 0);
     dp_packet_batch_init_packet(&pb, execute->packet);
     odp_execute_actions(&aux, &pb, false, execute->actions,
                         execute->actions_len, dpif_execute_helper_cb);
+    ofpbuf_uninit(&aux.meter_actions);
     return aux.error;
 }
 

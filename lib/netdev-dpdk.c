@@ -155,17 +155,6 @@ typedef uint16_t dpdk_port_t;
 
 #define IF_NAME_SZ (PATH_MAX > IFNAMSIZ ? PATH_MAX : IFNAMSIZ)
 
-/* List of required flags advertised by the hardware that will be used
- * if TSO is enabled. Ideally this should include
- * RTE_ETH_TX_OFFLOAD_SCTP_CKSUM. However, very few drivers support that
- * at the moment and SCTP is not a widely used protocol like TCP and UDP,
- * so it's optional. */
-#define DPDK_TX_TSO_OFFLOAD_FLAGS (RTE_ETH_TX_OFFLOAD_TCP_TSO        \
-                                   | RTE_ETH_TX_OFFLOAD_TCP_CKSUM    \
-                                   | RTE_ETH_TX_OFFLOAD_UDP_CKSUM    \
-                                   | RTE_ETH_TX_OFFLOAD_IPV4_CKSUM)
-
-
 static const struct rte_eth_conf port_conf = {
     .rxmode = {
         .offloads = 0,
@@ -1813,6 +1802,7 @@ static void
 netdev_dpdk_vhost_destruct(struct netdev *netdev)
 {
     struct netdev_dpdk *dev = netdev_dpdk_cast(netdev);
+    bool is_client_mode;
     char *vhost_id;
 
     ovs_mutex_lock(&dpdk_mutex);
@@ -1827,6 +1817,7 @@ netdev_dpdk_vhost_destruct(struct netdev *netdev)
     }
 
     vhost_id = dev->vhost_id;
+    is_client_mode = dev->vhost_driver_flags & RTE_VHOST_USER_CLIENT;
     dev->vhost_id = NULL;
     rte_free(dev->vhost_rxq_enabled);
 
@@ -1841,7 +1832,7 @@ netdev_dpdk_vhost_destruct(struct netdev *netdev)
     if (dpdk_vhost_driver_unregister(dev, vhost_id)) {
         VLOG_ERR("%s: Unable to unregister vhost driver for socket '%s'.\n",
                  netdev->name, vhost_id);
-    } else if (!(dev->vhost_driver_flags & RTE_VHOST_USER_CLIENT)) {
+    } else if (!is_client_mode) {
         /* OVS server mode - remove this socket from list for deletion */
         fatal_signal_remove_file_to_unlink(vhost_id);
     }
@@ -2677,18 +2668,18 @@ netdev_dpdk_prep_hwol_packet(struct netdev_dpdk *dev, struct rte_mbuf *mbuf)
         int hdr_len;
 
         mbuf->l4_len = TCP_OFFSET(th->tcp_ctl) * 4;
+
+        hdr_len = mbuf->l2_len + mbuf->l3_len + mbuf->l4_len;
+        link_tso_segsz = dev->mtu - mbuf->l3_len - mbuf->l4_len;
         if (tunnel_type) {
-            link_tso_segsz = dev->mtu - mbuf->l2_len - mbuf->l3_len -
-                             mbuf->l4_len - mbuf->outer_l3_len;
-        } else {
-            link_tso_segsz = dev->mtu - mbuf->l3_len - mbuf->l4_len;
+            hdr_len += mbuf->outer_l2_len + mbuf->outer_l3_len;
+            link_tso_segsz -= mbuf->outer_l3_len + mbuf->l2_len;
         }
 
         if (mbuf->tso_segsz > link_tso_segsz) {
             mbuf->tso_segsz = link_tso_segsz;
         }
 
-        hdr_len = mbuf->l2_len + mbuf->l3_len + mbuf->l4_len;
         if (OVS_UNLIKELY((hdr_len + mbuf->tso_segsz) > dev->max_packet_len)) {
             VLOG_WARN_RL(&rl, "%s: Oversized TSO packet. hdr: %"PRIu32", "
                          "gso: %"PRIu32", max len: %"PRIu32"",
@@ -2696,12 +2687,11 @@ netdev_dpdk_prep_hwol_packet(struct netdev_dpdk *dev, struct rte_mbuf *mbuf)
                          dev->max_packet_len);
             return false;
         }
-    }
 
-    /* If L4 checksum is requested, IPv4 should be requested as well. */
-    if (mbuf->ol_flags & RTE_MBUF_F_TX_L4_MASK
-        && mbuf->ol_flags & RTE_MBUF_F_TX_IPV4) {
-        mbuf->ol_flags |= RTE_MBUF_F_TX_IP_CKSUM;
+        /* DPDK API mandates IPv4 checksum when requesting TSO. */
+        if (mbuf->ol_flags & RTE_MBUF_F_TX_IPV4) {
+            mbuf->ol_flags |= RTE_MBUF_F_TX_IP_CKSUM;
+        }
     }
 
     return true;
@@ -2951,6 +2941,14 @@ netdev_dpdk_rxq_recv(struct netdev_rxq *rxq, struct dp_packet_batch *batch,
         return EAGAIN;
     }
 
+    if (qfill) {
+        if (nb_rx == NETDEV_MAX_BURST) {
+            *qfill = rte_eth_rx_queue_count(rx->port_id, rxq->queue_id);
+        } else {
+            *qfill = 0;
+        }
+    }
+
     if (policer) {
         dropped = nb_rx;
         nb_rx = ingress_policer_run(policer,
@@ -2969,14 +2967,6 @@ netdev_dpdk_rxq_recv(struct netdev_rxq *rxq, struct dp_packet_batch *batch,
 
     batch->count = nb_rx;
     dp_packet_batch_init_packet_fields(batch);
-
-    if (qfill) {
-        if (nb_rx == NETDEV_MAX_BURST) {
-            *qfill = rte_eth_rx_queue_count(rx->port_id, rxq->queue_id);
-        } else {
-            *qfill = 0;
-        }
-    }
 
     return 0;
 }
@@ -4077,6 +4067,23 @@ netdev_dpdk_get_speed(const struct netdev *netdev, uint32_t *current,
     }
 
     return 0;
+}
+
+static int
+netdev_dpdk_get_duplex(const struct netdev *netdev, bool *full_duplex)
+{
+    struct netdev_dpdk *dev = netdev_dpdk_cast(netdev);
+    int err = 0;
+
+    ovs_mutex_lock(&dev->mutex);
+    if (dev->link.link_speed != RTE_ETH_SPEED_NUM_UNKNOWN) {
+        *full_duplex = dev->link.link_duplex == RTE_ETH_LINK_FULL_DUPLEX;
+    } else {
+        err = EOPNOTSUPP;
+    }
+    ovs_mutex_unlock(&dev->mutex);
+
+    return err;
 }
 
 static struct ingress_policer *
@@ -6761,6 +6768,7 @@ parse_vhost_config(const struct smap *ovs_other_config)
     .get_custom_stats = netdev_dpdk_get_custom_stats,   \
     .get_features = netdev_dpdk_get_features,           \
     .get_speed = netdev_dpdk_get_speed,                 \
+    .get_duplex = netdev_dpdk_get_duplex,               \
     .get_status = netdev_dpdk_get_status,               \
     .reconfigure = netdev_dpdk_reconfigure,             \
     .rxq_recv = netdev_dpdk_rxq_recv

@@ -88,7 +88,8 @@ RECONCILIATION_INTERVAL = 15  # seconds
 TIMEOUT_EXPIRED = 137  # Exit code for a SIGKILL (128 + 9).
 
 
-def run_command(args, description=None):
+def run_command(args, description=None,
+                warn_on_failure=True, stderr_ignore=[]):
     """ This function runs the process args[0] with args[1:] arguments
     and returns a tuple: return-code, stdout, stderr. """
 
@@ -110,7 +111,10 @@ def run_command(args, description=None):
         proc.kill()
         ret = TIMEOUT_EXPIRED
 
-    if proc.returncode or perr:
+    for ignore in stderr_ignore:
+        perr = perr.replace(ignore.encode(), b'')
+
+    if (proc.returncode or perr) and warn_on_failure:
         vlog.warn("Failed to %s; exit code: %d"
                   % (description, proc.returncode))
         vlog.warn("cmdline: %s" % proc.args)
@@ -430,7 +434,6 @@ config setup
     uniqueids=yes
 
 conn %%default
-    keyingtries=%%forever
     type=transport
     auto=route
     ike=aes_gcm256-sha2_256
@@ -511,6 +514,9 @@ conn prevent_unencrypted_vxlan
             # With v5, LibreSWAN removed the auto command, however, it is
             # still required for older versions
             self.IPSEC_AUTO.append("auto")
+            # keyingtries is obsolete in v5 and has no effect.
+            self.CONF_HEADER = self.CONF_HEADER.rstrip()
+            self.CONF_HEADER += "\n    keyingtries=%forever\n\n"
 
         if version >= 4:
             ipsec_d = args.ipsec_d if args.ipsec_d else "/var/lib/ipsec/nss"
@@ -661,57 +667,47 @@ conn prevent_unencrypted_vxlan
                 self.conns_not_active["added"].pop(conn, None)
                 self.conns_not_active["started"].pop(conn, None)
 
-            # Remove connections that didn't become active after --start
-            # or an explicit --up.
-            for conn in list(loaded):
+            # Remove all the loaded or active but not desired connections.
+            for conn in (loaded | active) - desired:
+                self._delete_ipsec_connection(conn, "is outdated")
+                loaded.discard(conn)
+                active.discard(conn)
+
+            # Check all the loaded but not active connections.
+            for conn in loaded - active:
+                # Remove connections that didn't become active after --start
+                # or an explicit --up.
                 started = self.conns_not_active["started"].get(conn, None)
 
                 if started and self.conn_should_reconcile(started):
                     self._delete_ipsec_connection(conn, "is defunct")
-                    loaded.remove(conn)
-
-            # Remove all the loaded or active but not desired connections.
-            for conn in loaded | active:
-                if conn not in desired:
-                    self._delete_ipsec_connection(conn, "is outdated")
                     loaded.discard(conn)
-                    active.discard(conn)
 
-            # If not all desired are loaded, remove all the loaded and
-            # active for this tunnel and re-load only the desired ones.
-            # Need to do that, because connections for the same tunnel
-            # may share SAs.  If one is loaded and the other is not,
-            # it means the second one failed, so the shared SA may be in
-            # a broken state.
-            if desired != loaded:
-                for conn in loaded | active:
-                    self._delete_ipsec_connection(conn, "is half-loaded")
-                    loaded.discard(conn)
-                    active.discard(conn)
+                # Bring UP connections that were loaded but didn't become
+                # active on their own.
+                added = self.conns_not_active["added"].get(conn, None)
 
-                for conn in desired:
-                    # Start (add + up) outgoing connections and only add
-                    # incoming ones.  If the other side will not initiate
-                    # the connection and it will not become active, we'll
-                    # bring it up during the next refresh.
-                    if re.match(r".*-in-\d+$", conn):
-                        vlog.info("Adding ipsec connection %s" % conn)
-                        self._start_ipsec_connection(conn, "add")
-                    else:
-                        vlog.info("Starting ipsec connection %s" % conn)
-                        self._start_ipsec_connection(conn, "start")
-            else:
-                # Ask pluto to bring UP connections that are loaded,
-                # but not active for some reason.
-                #
-                # desired == loaded and desired >= loaded + active,
-                # so loaded >= active
-                for conn in loaded - active:
-                    added = self.conns_not_active["added"].get(conn, None)
+                if added and self.conn_should_reconcile(added):
+                    vlog.info("Bringing up ipsec connection %s" % conn)
+                    self._start_ipsec_connection(conn, "up")
 
-                    if added and self.conn_should_reconcile(added):
-                        vlog.info("Bringing up ipsec connection %s" % conn)
-                        self._start_ipsec_connection(conn, "up")
+                # Check for connections that were active bafore, but no longer.
+                if not added and not started:
+                    vlog.info("Connection %s went down, bringing it up" % conn)
+                    self._start_ipsec_connection(conn, "up")
+
+            # Load all the desired but not loaded yet connections.
+            for conn in desired - loaded:
+                # Start (add + up) outgoing connections and only add
+                # incoming ones.  If the other side will not initiate
+                # the connection and it will not become active, we'll
+                # bring it up during the next refresh.
+                if re.match(r".*-in-\d+$", conn):
+                    vlog.info("Adding ipsec connection %s" % conn)
+                    self._start_ipsec_connection(conn, "add")
+                else:
+                    vlog.info("Starting ipsec connection %s" % conn)
+                    self._start_ipsec_connection(conn, "start")
 
         # Update shunt policy if changed
         if monitor.conf_in_use["skb_mark"] != monitor.conf["skb_mark"]:
@@ -804,7 +800,8 @@ conn prevent_unencrypted_vxlan
         return conns
 
     def get_active_conns(self):
-        return self.get_conns_from_status(r"#\d+: .*\"(.*)\".*")
+        return self.get_conns_from_status(
+            r"#\d+: .*\"(.*)\".*esp[.:][0-9a-f]+@.*")
 
     def get_loaded_conns(self):
         return self.get_conns_from_status(
@@ -879,12 +876,19 @@ conn prevent_unencrypted_vxlan
 
     def _start_ipsec_connection(self, conn, action):
         asynchronous = [] if action == "add" else ["--asynchronous"]
+        # Some versions of Libreswan (5.3+) warn that 'auto' in the config
+        # file is not taken into account while calling ipsec add/start.
+        # This is expected and we shouldn't warn users about this as the
+        # message itself is a bit misleading:
+        #   https://github.com/libreswan/libreswan/issues/2584
+        ignore = ["conn %s: overriding auto=route with auto=add\n" % conn]
         ret, pout, perr = run_command(self.IPSEC_AUTO +
                                       ["--config", self.IPSEC_CONF,
                                       "--ctlsocket", self.IPSEC_CTL,
                                       "--" + action,
                                       *asynchronous, conn],
-                                      "%s %s" % (action, conn))
+                                      "%s %s" % (action, conn),
+                                      stderr_ignore=ignore)
 
         if re.match(r".*[F|f]ailed to initiate connection.*", pout):
             vlog.err('Failed to initiate connection through'
@@ -923,18 +927,85 @@ conn prevent_unencrypted_vxlan
             elif name.startswith(self.CERTKEY_PREFIX):
                 self._nss_delete_cert_and_key(name)
 
+    def _nss_get_cert(self, name):
+        """Obtains ASCII-formatted (PEM) certificate from the NSS database
+        by name.  If multiple certificates have the same name, all will be
+        returned together."""
+
+        ret, pout, perr = run_command(
+            ['certutil', '-L', '-d', self.IPSEC_D, '-a', '-n', name],
+            "get certificate %s from NSS" % name, warn_on_failure=False)
+        return None if ret else pout
+
+    def _pem_get_certs(self, pem_text):
+        """Returns a set of all base64-encoded certificates in the 'pem_text'.
+        Can be used to unify slightly different formats between different files
+        and NSS database dumps."""
+
+        pattern = r"--*BEGIN CERTIFICATE--*(.*?)--*END CERTIFICATE--*"
+        matches = re.findall(pattern, pem_text, re.DOTALL)
+        return {re.sub(r'[^A-Za-z0-9+/=]', '', body) for body in matches}
+
+    def _cert_check_and_remove_obsolete(self, cert, name):
+        """Looks up the certificate in the NSS database, removes all the
+        certificates that have the same 'name' but do not match the 'cert'.
+        Returns False if the 'cert' is not in the database in the end,
+        True otherwise."""
+
+        certs = set()
+        with open(cert) as f:
+            certs = self._pem_get_certs(f.read())
+
+        while True:
+            current = self._nss_get_cert(name)
+            if current is None:
+                # There are no certificates in the database.
+                return False
+
+            current_certs = self._pem_get_certs(current)
+            if certs == current_certs:
+                # The certificates are up to date.
+                return True
+
+            vlog.info(
+                "Mismatched certificate %s in the NSS database, removing."
+                % name
+            )
+
+            # Delete one certificate and try again.
+            res = 0
+            if name.startswith(self.CERT_PREFIX):
+                res = self._nss_delete_cert(name)
+            else:
+                res = self._nss_delete_cert_and_key(name)
+
+            if res != 0:
+                # We failed to remove the certificate.  Assume that the
+                # one we need is not there.
+                return False
+
     def _nss_import_cert(self, cert, name, cert_type):
         """Cert_type is 'CT,,' for the CA certificate and 'P,P,P' for the
         normal certificate."""
+
+        if self._cert_check_and_remove_obsolete(cert, name):
+            # Already in the database.
+            return
+
         run_command(['certutil', '-A', '-a', '-i', cert, '-d', self.IPSEC_D,
                      '-n', name, '-t', cert_type],
                     "import certificate %s into NSS" % name)
 
     def _nss_delete_cert(self, name):
-        run_command(['certutil', '-D', '-d', self.IPSEC_D, '-n', name],
-                    "delete certificate %s from NSS" % name)
+        return run_command(['certutil', '-D', '-d', self.IPSEC_D, '-n', name],
+                           "delete certificate %s from NSS" % name)[0]
 
     def _nss_import_cert_and_key(self, cert, key, name):
+        if self._cert_check_and_remove_obsolete(cert, name):
+            # Already in the database.  And if the cert is the same, the
+            # key must be the same as well.
+            return
+
         # Avoid deleting other files
         path = os.path.abspath('/tmp/%s.p12' % name)
         if not path.startswith('/tmp/'):
@@ -955,8 +1026,9 @@ conn prevent_unencrypted_vxlan
 
     def _nss_delete_cert_and_key(self, name):
         # Delete certificate and private key
-        run_command(['certutil', '-F', '-d', self.IPSEC_D, '-n', name],
-                    "delete certificate and private key for %s" % name)
+        return run_command(
+            ['certutil', '-F', '-d', self.IPSEC_D, '-n', name],
+            "delete certificate and private key for %s" % name)[0]
 
 
 class IPsecTunnel(object):

@@ -4385,6 +4385,7 @@ compose_output_action__(struct xlate_ctx *ctx, ofp_port_t ofp_port,
     struct eth_addr flow_dl_src = flow->dl_src;
     ovs_be32 flow_packet_type = flow->packet_type;
     ovs_be16 flow_dl_type = flow->dl_type;
+    bool skip_mirrors = false;
 
     /* If 'struct flow' gets additional metadata, we'll need to zero it out
      * before traversing a patch port. */
@@ -4503,6 +4504,10 @@ compose_output_action__(struct xlate_ctx *ctx, ofp_port_t ofp_port,
             /* Recirc action. */
             nl_msg_put_u32(ctx->odp_actions, OVS_ACTION_ATTR_RECIRC,
                            xr->recirc_id);
+
+            /* Recirculation does not send the packet anywhere, so it
+             * should not trigger mirroring. */
+            skip_mirrors = true;
         } else if (is_native_tunnel) {
             /* Output to native tunnel port. */
             native_tunnel_output(ctx, xport, flow, odp_port, truncate,
@@ -4545,7 +4550,8 @@ compose_output_action__(struct xlate_ctx *ctx, ofp_port_t ofp_port,
         ctx->nf_output_iface = ofp_port;
     }
 
-    if (mbridge_has_mirrors(ctx->xbridge->mbridge) && xport->xbundle) {
+    if (!skip_mirrors && mbridge_has_mirrors(ctx->xbridge->mbridge)
+        && xport->xbundle) {
         mirror_packet(ctx, xport->xbundle,
                       xbundle_mirror_dst(xport->xbundle->xbridge,
                                          xport->xbundle));
@@ -4899,6 +4905,8 @@ pick_dp_hash_select_group(struct xlate_ctx *ctx, struct group_dpif *group)
             hash_alg = OVS_HASH_ALG_L4;
         }
         ctx_trigger_recirculate_with_hash(ctx, hash_alg, group->hash_basis);
+        xlate_report(ctx, OFT_DETAIL,
+                     "selection method in use: dp_hash, recirculating");
         return NULL;
     } else {
         uint32_t hash_mask = group->hash_mask;
@@ -4978,7 +4986,9 @@ xlate_group_action__(struct xlate_ctx *ctx, struct group_dpif *group,
             xlate_group_bucket(ctx, bucket, is_last_action);
             xlate_group_stats(ctx, group, bucket);
         } else {
-            xlate_report(ctx, OFT_DETAIL, "no live bucket");
+            if (!ctx->freezing) {
+                xlate_report(ctx, OFT_DETAIL, "no live bucket");
+            }
             if (ctx->xin->xcache) {
                 ofproto_group_unref(&group->up);
             }
@@ -7483,7 +7493,13 @@ do_xlate_actions(const struct ofpact *ofpacts, size_t ofpacts_len,
             /* Set the field only if the packet actually has it. */
             if (mf_are_prereqs_ok(mf, flow, wc)) {
                 mf_set_mask_l3_prereqs(mf, flow, wc);
-                mf_mask_field_masked(mf, ofpact_set_field_mask(set_field), wc);
+                /* Tunnel fields do not need to be unwildcarded, as ODP library
+                 * doesn't rely on matching these fields when they are written
+                 * but not read. */
+                if (!mf_is_tunnel_field(mf)) {
+                    mf_mask_field_masked(mf, ofpact_set_field_mask(set_field),
+                                         wc);
+                }
                 mf_set_flow_value_masked(mf, set_field->value,
                                          ofpact_set_field_mask(set_field),
                                          flow);

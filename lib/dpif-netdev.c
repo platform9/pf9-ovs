@@ -287,7 +287,7 @@ struct dp_netdev {
 
     /* Meters. */
     struct ovs_mutex meters_lock;
-    struct cmap meters OVS_GUARDED;
+    struct cmap meters;
 
     /* Probability of EMC insertions is a factor of 'emc_insert_min'.*/
     atomic_uint32_t emc_insert_min;
@@ -2414,7 +2414,7 @@ dpif_netdev_port_query_by_number(const struct dpif *dpif, odp_port_t port_no,
     struct dp_netdev_port *port;
     int error;
 
-    ovs_rwlock_wrlock(&dp->port_rwlock);
+    ovs_rwlock_rdlock(&dp->port_rwlock);
     error = get_port_by_number(dp, port_no, &port);
     if (!error && dpif_port) {
         answer_port_query(port, dpif_port);
@@ -2599,10 +2599,10 @@ mark_to_flow_associate(const uint32_t mark, struct dp_netdev_flow *flow)
     unsigned int tid = netdev_offload_thread_id();
     dp_netdev_flow_ref(flow);
 
+    flow->mark = mark;
     cmap_insert(&dp_offload_threads[tid].mark_to_flow,
                 CONST_CAST(struct cmap_node *, &flow->mark_node),
                 hash_int(mark, 0));
-    flow->mark = mark;
 
     VLOG_DBG("Associated dp_netdev flow %p with mark %u mega_ufid "UUID_FMT,
              flow, mark, UUID_ARGS((struct uuid *) &flow->mega_ufid));
@@ -3084,7 +3084,7 @@ queue_netdev_flow_put(struct dp_netdev_pmd_thread *pmd,
     flow_offload = &item->data->flow;
     flow_offload->match = *match;
     flow_offload->actions = xmalloc(actions_len);
-    memcpy(flow_offload->actions, actions, actions_len);
+    nullable_memcpy(flow_offload->actions, actions, actions_len);
     flow_offload->actions_len = actions_len;
     flow_offload->orig_in_port = flow->orig_in_port;
 
@@ -7832,6 +7832,7 @@ dp_netdev_pmd_get_next(struct dp_netdev *dp, struct cmap_position *pos)
 static void
 dp_netdev_configure_pmd(struct dp_netdev_pmd_thread *pmd, struct dp_netdev *dp,
                         unsigned core_id, int numa_id)
+    OVS_NO_THREAD_SAFETY_ANALYSIS
 {
     pmd->dp = dp;
     pmd->core_id = core_id;
@@ -7886,6 +7887,7 @@ dp_netdev_configure_pmd(struct dp_netdev_pmd_thread *pmd, struct dp_netdev *dp,
 
 static void
 dp_netdev_destroy_pmd(struct dp_netdev_pmd_thread *pmd)
+    OVS_NO_THREAD_SAFETY_ANALYSIS
 {
     struct dpcls *cls;
 

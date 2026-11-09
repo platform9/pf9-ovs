@@ -736,6 +736,8 @@ IP_ECN_is_ce(uint8_t dsfield)
 #define IP_FRAG_OFF_MASK  0x1fff /* Fragment offset. */
 #define IP_IS_FRAGMENT(ip_frag_off) \
         ((ip_frag_off) & htons(IP_MORE_FRAGMENTS | IP_FRAG_OFF_MASK))
+#define IP_IS_LATER_FRAG(ip_frag_off) \
+        ((ip_frag_off) & htons(IP_FRAG_OFF_MASK))
 
 #define IP_HEADER_LEN 20
 struct ip_header {
@@ -977,6 +979,8 @@ union ovs_16aligned_in6_addr {
     ovs_be16 be16[8];
     ovs_16aligned_be32 be32[4];
 };
+BUILD_ASSERT_DECL(sizeof(union ovs_16aligned_in6_addr)
+                  == sizeof(struct in6_addr));
 
 /* Like struct ip6_hdr, but whereas that struct requires 32-bit alignment, this
  * one only requires 16-bit alignment. */

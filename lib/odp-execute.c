@@ -723,6 +723,14 @@ odp_execute_sample(void *dp, struct dp_packet *packet, bool steal,
         }
     }
 
+    if (!subactions) {
+        if (steal) {
+            COVERAGE_INC(datapath_drop_sample_error);
+            dp_packet_delete(packet);
+        }
+        return;
+    }
+
     if (!steal) {
         /* The 'subactions' may modify the packet, but the modification
          * should not propagate beyond this sample action. Make a copy
@@ -780,6 +788,26 @@ odp_execute_check_pkt_len(void *dp, struct dp_packet *packet, bool steal,
     struct dp_packet_batch pb;
     uint32_t size = dp_packet_get_send_len(packet)
                     - dp_packet_l2_pad_size(packet);
+
+    if (dp_packet_hwol_is_tso(packet)) {
+        const void *payload;
+        uint32_t segsize;
+
+        if (dp_packet_hwol_is_tunnel_geneve(packet) ||
+            dp_packet_hwol_is_tunnel_vxlan(packet)) {
+            payload = dp_packet_get_inner_tcp_payload(packet);
+        } else {
+            payload = dp_packet_get_tcp_payload(packet);
+        }
+        if (payload) {
+            /* Evaluate a segment maximum length for this TSO packet. */
+            segsize = (char *) payload - (char *) dp_packet_data(packet)
+                      + dp_packet_get_tso_segsz(packet);
+            if (segsize < size) {
+                size = segsize;
+            }
+        }
+    }
 
     a = attrs[OVS_CHECK_PKT_LEN_ATTR_PKT_LEN];
     if (size > nl_attr_get_u16(a)) {

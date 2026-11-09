@@ -14,7 +14,7 @@ jobs:
       dependencies: gcc libnuma-dev libxdp-dev ninja-build pkgconf
       CC: gcc
       DPDK_GIT: https://dpdk.org/git/dpdk-stable
-      DPDK_VER: 23.11.4
+      DPDK_VER: 23.11.6
     name: dpdk gcc
     outputs:
       dpdk_key: ${{ steps.gen_dpdk_key.outputs.key }}
@@ -23,7 +23,7 @@ jobs:
 
     steps:
     - name: checkout
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
 
     - name: update PATH
       run:  |
@@ -52,14 +52,14 @@ jobs:
 
     - name: cache
       id: dpdk_cache
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: dpdk-dir
         key:  ${{ steps.gen_dpdk_key.outputs.key }}
 
     - name: set up python
       if: steps.dpdk_cache.outputs.cache-hit != 'true'
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6
       with:
         python-version: ${{ env.python_default }}
 
@@ -93,7 +93,7 @@ jobs:
 
     steps:
     - name: Checkout Libreswan
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
       with:
         repository: libreswan/libreswan
         path: libreswan
@@ -106,7 +106,7 @@ jobs:
 
     - name: cache
       id: libreswan_cache
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: libreswan-deb
         key:  ${{ steps.gen_libreswan_key.outputs.key }}
@@ -181,10 +181,10 @@ jobs:
             opts:         --enable-shared
 
           - compiler:     gcc
-            testsuite:    check check-dpdk
+            testsuite:    check
             dpdk:         dpdk
           - compiler:     clang
-            testsuite:    check check-dpdk
+            testsuite:    check
             dpdk:         dpdk
 
           - compiler:     gcc
@@ -261,13 +261,9 @@ jobs:
             dpdk:         dpdk
             testsuite:    check-system-tso
 
-          - compiler:     gcc
-            dpdk:         dpdk
-            testsuite:    check-afxdp
-
     steps:
     - name: checkout
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
 
     - name: update PATH
       run:  |
@@ -275,7 +271,7 @@ jobs:
         echo "$HOME/.local/bin" >> $GITHUB_PATH
 
     - name: set up python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6
       with:
         python-version: ${{ env.python_default }}
 
@@ -295,13 +291,13 @@ jobs:
 
     - name: DPDK cache
       if:   matrix.dpdk != '' || matrix.dpdk_shared != ''
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: dpdk-dir
         key:  ${{ needs.build-dpdk.outputs.dpdk_key }}
 
     - name: Libreswan cache
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: libreswan-deb
         key:  ${{ needs.build-libreswan.outputs.libreswan_key }}
@@ -321,7 +317,7 @@ jobs:
       run:  sudo apt install -y gcc-multilib
 
     - name: checkout sparse
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
       # Official mirror of the git.kernel.org/pub/scm/devel/sparse/sparse.git.
       with:
         repository: lucvoo/sparse
@@ -348,7 +344,7 @@ jobs:
 
     - name: upload logs on failure
       if: failure() || cancelled()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: logs-linux-${{ join(matrix.*, '-') }}
         path: logs.tgz
@@ -371,7 +367,7 @@ jobs:
 
     steps:
     - name: checkout
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
       with:
         fetch-depth: 0
 
@@ -430,20 +426,20 @@ jobs:
 
     - name: check for analyzer result cache
       id: clang_cache
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: base-clang-analyzer-results
         key:  ${{ steps.cache_key.outputs.key }}
 
     - name: set up python
       if: steps.clang_cache.outputs.cache-hit != 'true'
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6
       with:
         python-version: ${{ env.python_default }}
 
     - name: get cached dpdk-dir
       if: steps.clang_cache.outputs.cache-hit != 'true'
-      uses: actions/cache/restore@v4
+      uses: actions/cache/restore@v5
       with:
         path: dpdk-dir
         key:  ${{ needs.build-dpdk.outputs.dpdk_key }}
@@ -484,7 +480,7 @@ jobs:
 
     steps:
     - name: checkout
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
 
     - name: update PATH
       run: |
@@ -492,18 +488,18 @@ jobs:
         echo "$HOME/.local/bin" >> $GITHUB_PATH
 
     - name: check for analyzer result cache
-      uses: actions/cache/restore@v4
+      uses: actions/cache/restore@v5
       with:
         path: base-clang-analyzer-results
         key:  ${{ needs.build-clang-analyze-cache.outputs.key }}
 
     - name: set up python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6
       with:
         python-version: ${{ env.python_default }}
 
     - name: get cached dpdk-dir
-      uses: actions/cache/restore@v4
+      uses: actions/cache/restore@v5
       with:
         path: dpdk-dir
         key:  ${{ needs.build-dpdk.outputs.dpdk_key }}
@@ -534,13 +530,13 @@ jobs:
 
     steps:
     - name: checkout
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
     - name: update PATH
       run:  |
         echo "$HOME/bin"        >> $GITHUB_PATH
         echo "$HOME/.local/bin" >> $GITHUB_PATH
     - name: set up python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6
       with:
         python-version: ${{ env.python_default }}
     - name: install dependencies
@@ -551,7 +547,7 @@ jobs:
       run:  ./.ci/osx-build.sh
     - name: upload logs on failure
       if: failure()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: logs-osx-clang---disable-ssl
         path: config.log
@@ -575,7 +571,7 @@ jobs:
 
     steps:
     - name: checkout
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
 
     - name: update PATH
       run:  |
@@ -597,7 +593,7 @@ jobs:
       run:  ./.ci/linux-build.sh
 
     - name: upload deb packages
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: deb-packages-${{ matrix.dpdk }}-dpdk
         path: '/home/runner/work/ovs/*.deb'
@@ -605,7 +601,7 @@ jobs:
   build-linux-rpm:
     name: linux rpm fedora
     runs-on: ubuntu-latest
-    container: fedora:41
+    container: fedora:43
     timeout-minutes: 30
 
     strategy:
@@ -613,13 +609,13 @@ jobs:
 
     steps:
     - name: checkout
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
     - name: install dependencies
       run: |
         dnf install -y rpm-build dnf-plugins-core
         sed -e 's/@VERSION@/0.0.1/' rhel/openvswitch-fedora.spec.in \
             > /tmp/ovs.spec
-        dnf builddep -y /tmp/ovs.spec
+        dnf builddep --exclude='*.i686' -y /tmp/ovs.spec
         rm -f /tmp/ovs.spec
 
     - name: configure
@@ -632,7 +628,7 @@ jobs:
       run:  dnf install -y rpm/rpmbuild/RPMS/*/*.rpm
 
     - name: upload rpm packages
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: rpm-packages
         path: |

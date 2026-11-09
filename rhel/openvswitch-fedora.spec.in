@@ -16,10 +16,6 @@
 # and should not be used otherwise (these tests require root privileges).
 # These tests can be executed, for example, via:
 #    rpmbuild -rb --with check_datapath_kernel openvswitch-fedora.src.rpm
-#
-# These tests will use the currently installed OVS kernel modules.
-
-#%define kernel 2.6.40.4-5.fc15.x86_64
 
 # If libcap-ng isn't available and there is no need for running OVS
 # as regular user, specify the '--without libcapng'
@@ -68,6 +64,11 @@ BuildRequires: /usr/bin/sphinx-build-3
 BuildRequires: procps-ng
 %if %{with libcapng}
 BuildRequires: libcap-ng libcap-ng-devel
+Provides: user(openvswitch)
+Provides: group(openvswitch)
+%if %{with dpdk}
+Provides: group(hugetlbfs)
+%endif
 %endif
 %if %{with dpdk}
 BuildRequires: libpcap-devel numactl-devel
@@ -80,8 +81,6 @@ BuildRequires: libxdp-devel libbpf-devel numactl-devel
 BuildRequires: unbound unbound-devel
 
 Requires: openssl hostname iproute module-init-tools unbound
-#Upstream kernel commit 4f647e0a3c37b8d5086214128614a136064110c3
-#Requires: kernel >= 3.15.0-0
 
 Requires(pre): shadow-utils
 Requires(post): /bin/sed
@@ -136,7 +135,7 @@ License: ASL 2.0
 This provides shared library, libopenswitch.so and the openvswitch header
 files needed to build an external application.
 
-%if 0%{?rhel} > 7 || (0%{?fedora} > 28 && 0%{?fedora} < 41)
+%if (0%{?rhel} > 7 && 0%{?rhel} < 9) || (0%{?fedora} > 28 && 0%{?fedora} < 41)
 %package -n network-scripts-%{name}
 Summary: Open vSwitch legacy network service support
 License: ASL 2.0
@@ -227,10 +226,13 @@ install -m 0644 vswitchd/vswitch.ovsschema \
         $RPM_BUILD_ROOT/%{_datadir}/openvswitch/vswitch.ovsschema
 
 install -d -m 0755 $RPM_BUILD_ROOT/%{_sysconfdir}/sysconfig/network-scripts/
+
+%if ! (0%{?rhel} >= 9 || 0%{?fedora} >= 41)
 install -p -m 0755 rhel/etc_sysconfig_network-scripts_ifdown-ovs \
         $RPM_BUILD_ROOT/%{_sysconfdir}/sysconfig/network-scripts/ifdown-ovs
 install -p -m 0755 rhel/etc_sysconfig_network-scripts_ifup-ovs \
         $RPM_BUILD_ROOT/%{_sysconfdir}/sysconfig/network-scripts/ifup-ovs
+%endif
 
 install -d -m 0755 $RPM_BUILD_ROOT%{python3_sitelib}
 cp -a $RPM_BUILD_ROOT/%{_datadir}/openvswitch/python/* \
@@ -253,6 +255,8 @@ install -p -D -m 0755 \
 
 # remove unpackaged files
 rm -f $RPM_BUILD_ROOT%{_bindir}/ovs-parse-backtrace
+# Remove .la files, if present (automatic with %__brp_remove_la_files on f36+).
+rm -f $RPM_BUILD_ROOT%{_libdir}/*.la
 
 %check
 %if %{with check}
@@ -412,10 +416,8 @@ fi
 %{_libdir}/pkgconfig/*.pc
 %{_includedir}/openvswitch/*
 %{_includedir}/openflow/*
-%exclude %{_libdir}/*.la
-%exclude %{_libdir}/*.a
 
-%if 0%{?rhel} > 7 || (0%{?fedora} > 28 && 0%{?fedora} < 41)
+%if (0%{?rhel} > 7 && 0%{?rhel} < 9) || (0%{?fedora} > 28 && 0%{?fedora} < 41)
 %files -n network-scripts-%{name}
 %{_sysconfdir}/sysconfig/network-scripts/ifup-ovs
 %{_sysconfdir}/sysconfig/network-scripts/ifdown-ovs
@@ -442,7 +444,7 @@ fi
 %{_unitdir}/ovs-vswitchd.service
 %{_unitdir}/ovs-delete-transient-ports.service
 %{_datadir}/openvswitch/scripts/openvswitch.init
-%if ! (0%{?rhel} > 7 || (0%{?fedora} > 28 && 0%{?fedora} < 41))
+%if ! (0%{?rhel} > 7 || 0%{?fedora} > 28)
 %{_sysconfdir}/sysconfig/network-scripts/ifup-ovs
 %{_sysconfdir}/sysconfig/network-scripts/ifdown-ovs
 %endif

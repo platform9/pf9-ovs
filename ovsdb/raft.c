@@ -1539,6 +1539,7 @@ raft_conn_receive(struct raft *raft, struct raft_conn *conn,
     if (error) {
         char *s = ovsdb_error_to_string_free(error);
         VLOG_INFO("%s: %s", jsonrpc_session_get_name(conn->js), s);
+        jsonrpc_session_force_reconnect(conn->js);
         free(s);
         return false;
     }
@@ -1554,6 +1555,7 @@ raft_conn_receive(struct raft *raft, struct raft_conn *conn,
                      SID_FMT" (expected "SID_FMT")",
                      jsonrpc_session_get_name(conn->js),
                      SID_ARGS(&rpc->common.sid), SID_ARGS(&conn->sid));
+        jsonrpc_session_force_reconnect(conn->js);
         raft_rpc_uninit(rpc);
         return false;
     }
@@ -1856,9 +1858,18 @@ raft_set_term(struct raft *raft, uint64_t term, const struct uuid *vote)
 
 static bool
 raft_accept_vote(struct raft *raft, struct raft_server *s,
-                 const struct uuid *vote)
+                 const struct uuid *vote, bool is_prevote)
 {
     if (uuid_equals(&s->vote, vote)) {
+        return false;
+    }
+    if (raft->prevote_passed && is_prevote) {
+        /* This is mostly a defensive check, as pre-vote and a vote should
+         * not happen on the same term.  But we'd like to know if they do. */
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+        VLOG_WARN_RL(&rl, "ignoring pre-vote reply from server %s "
+                          "during the actual election on term %"PRIu64".",
+                     s->nickname, raft->term);
         return false;
     }
     if (!uuid_is_zero(&s->vote)) {
@@ -1958,7 +1969,7 @@ raft_start_election(struct raft *raft, bool is_prevote,
     }
 
     /* Vote for ourselves. */
-    if (raft_accept_vote(raft, me, &raft->sid)) {
+    if (raft_accept_vote(raft, me, &raft->sid, is_prevote)) {
         /* We just started vote, so it shouldn't be accepted yet unless this is
          * a one-node cluster. In such case we don't do pre-vote, and become
          * leader immediately. */
@@ -3849,15 +3860,24 @@ raft_handle_vote_request__(struct raft *raft,
 {
     /* Figure 3.1: "If votedFor is null or candidateId, and candidate's vote is
      * at least as up-to-date as receiver's log, grant vote (sections 3.4,
-     * 3.6)." */
-    if (uuid_equals(&raft->vote, &rq->common.sid)) {
-        /* Already voted for this candidate in this term.  Resend vote. */
-        return true;
-    } else if (!uuid_is_zero(&raft->vote)) {
-        /* Already voted for different candidate in this term.  Send a reply
-         * saying what candidate we did vote for.  This isn't a necessary part
-         * of the Raft protocol but it can make debugging easier. */
-        return true;
+     * 3.6)."
+     *
+     * Note: The vote from the current term is not meaningful for the pre-vote,
+     * since the pre-vote supposed to determine if the vote for the *next* term
+     * can be successful or not.  The votedFor will be null at the beginning of
+     * the next term.  Hence the only requirement for granting a pre-vote is
+     * the candidate's log being at least as up-to-date as receiver's. */
+    if (!rq->is_prevote) {
+        if (uuid_equals(&raft->vote, &rq->common.sid)) {
+            /* Already voted for this candidate in this term.  Resend vote. */
+            return true;
+        } else if (!uuid_is_zero(&raft->vote)) {
+            /* Already voted for different candidate in this term.  Send a
+             * reply saying what candidate we did vote for.  This isn't a
+             * necessary part of the Raft protocol but it can make debugging
+             * easier. */
+            return true;
+        }
     }
 
     /* Section 3.6.1: "The RequestVote RPC implements this restriction: the RPC
@@ -3926,17 +3946,13 @@ static void
 raft_handle_vote_reply(struct raft *raft,
                        const struct raft_vote_reply *rpy)
 {
-    if (!raft_receive_term__(raft, &rpy->common, rpy->term)) {
-        return;
-    }
-
     if (raft->role != RAFT_CANDIDATE) {
         return;
     }
 
     struct raft_server *s = raft_find_peer(raft, &rpy->common.sid);
     if (s) {
-        if (raft_accept_vote(raft, s, &rpy->vote)) {
+        if (raft_accept_vote(raft, s, &rpy->vote, rpy->is_prevote)) {
             if (raft->prevote_passed) {
                 raft_become_leader(raft);
             } else {
@@ -4691,10 +4707,12 @@ raft_handle_rpc(struct raft *raft, const union raft_rpc *rpc)
         s->last_msg_ts = time_msec();
     }
 
+    if (raft_should_suppress_disruptive_server(raft, rpc)) {
+        return;
+    }
+
     uint64_t term = raft_rpc_get_term(rpc);
-    if (term
-        && !raft_should_suppress_disruptive_server(raft, rpc)
-        && !raft_receive_term__(raft, &rpc->common, term)) {
+    if (term && !raft_receive_term__(raft, &rpc->common, term)) {
         if (rpc->type == RAFT_RPC_APPEND_REQUEST) {
             /* Section 3.3: "If a server receives a request with a stale term
              * number, it rejects the request." */
@@ -5218,6 +5236,7 @@ raft_unixctl_failure_test(struct unixctl_conn *conn OVS_UNUSED,
         failure_test = FT_CRASH_BEFORE_SEND_SNAPSHOT_REP;
     } else if (!strcmp(test, "delay-election")) {
         failure_test = FT_DELAY_ELECTION;
+
         struct raft *raft;
         HMAP_FOR_EACH (raft, hmap_node, &all_rafts) {
             if (raft->role == RAFT_FOLLOWER) {
@@ -5226,6 +5245,13 @@ raft_unixctl_failure_test(struct unixctl_conn *conn OVS_UNUSED,
         }
     } else if (!strcmp(test, "dont-send-vote-request")) {
         failure_test = FT_DONT_SEND_VOTE_REQUEST;
+    } else if (!strcmp(test, "force-election")) {
+        struct raft *raft;
+        HMAP_FOR_EACH (raft, hmap_node, &all_rafts) {
+            if (raft->role != RAFT_LEADER) {
+                raft_start_election(raft, true, false);
+            }
+        }
     } else if (!strcmp(test, "stop-raft-rpc")) {
         failure_test = FT_STOP_RAFT_RPC;
     } else if (!strcmp(test,
